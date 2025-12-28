@@ -11,6 +11,12 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 from profiles import SurveyProfile, PROFILES
+import json
+import math
+from dataclasses import dataclass
+import matplotlib.patches as patches
+
+from openai import OpenAI
 
 import json
 from collections import defaultdict
@@ -293,6 +299,424 @@ def _llm_summarize_comments(client, comments: List[str], model: str, chunk_size:
     # Merge in one final call (merge summaries are much shorter than raw comments)
     final = call_one(partials, merge_mode=True)
     return final
+
+def _get_openai_client() -> Optional["OpenAI"]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        return OpenAI(api_key=api_key)
+    except Exception:
+        return None
+
+
+def _extract_first_json_object(text: str) -> Optional[dict]:
+    """
+    Models sometimes wrap JSON with extra text. This tries to extract the first {...} block.
+    """
+    if not text:
+        return None
+    text = text.strip()
+
+    # Fast path
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+    # Slow path: find first balanced JSON object
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                chunk = text[start : i + 1]
+                try:
+                    return json.loads(chunk)
+                except Exception:
+                    return None
+    return None
+
+
+def _infer_comment_col_indices(profile: SurveyProfile, df: pd.DataFrame) -> List[int]:
+    """
+    If you do not have a dedicated comment column list in profiles.py, this tries to guess.
+    It excludes: group, respondent name, rating cols, yes/no cols, choice col.
+    Then it picks columns that look "texty".
+    """
+    cols = list(df.columns)
+    exclude = set()
+
+    if profile.group_col_index is not None:
+        exclude.add(int(profile.group_col_index))
+    if profile.respondent_name_index is not None:
+        exclude.add(int(profile.respondent_name_index))
+
+    for i in (profile.rating_col_indices or []):
+        exclude.add(int(i))
+    for i in (profile.yesno_col_indices or []):
+        exclude.add(int(i))
+    if profile.choice_col_index is not None:
+        exclude.add(int(profile.choice_col_index))
+
+    comment_idxs: List[int] = []
+    for i, col in enumerate(cols):
+        if i in exclude:
+            continue
+
+        s = _clean_series_as_str_keep_len(df.iloc[:, i])
+        nonempty = s[s != ""]
+        if nonempty.empty:
+            continue
+
+        # Heuristics: average length and % non-empty
+        avg_len = float(nonempty.str.len().mean())
+        frac_nonempty = float((s != "").mean())
+
+        # "Texty enough"
+        if avg_len >= 20 and frac_nonempty >= 0.05:
+            comment_idxs.append(i)
+
+    return comment_idxs
+
+
+def _collect_comments_text(profile: SurveyProfile, df: pd.DataFrame) -> str:
+    """
+    Returns one big string of bullet comments that we will summarize.
+    """
+    # If you later add a list to profiles.py like profile.comment_col_indices, use it here.
+    # For now we infer:
+    comment_idxs = _infer_comment_col_indices(profile, df)
+
+    comments: List[str] = []
+    for idx in comment_idxs:
+        series = _clean_series_as_str_keep_len(df.iloc[:, idx])
+        for v in series.tolist():
+            v = str(v).strip()
+            if not v:
+                continue
+            # Skip obvious non-comments
+            if v.upper() in YES_SET or v.upper() in NO_SET:
+                continue
+            if len(v) <= 2:
+                continue
+            comments.append(v)
+
+    # Light de-dupe while preserving order
+    seen = set()
+    deduped: List[str] = []
+    for c in comments:
+        key = c.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+
+    # Format as bullets for the model
+    return "\n".join([f"- {c}" for c in deduped])
+
+
+def _openai_summarize_comments_to_json(
+    comments_bullets: str,
+    model: str = "gpt-5-mini",
+    max_themes: int = 10,
+    max_quotes_per_theme: int = 3,
+) -> Optional[dict]:
+    client = _get_openai_client()
+    if client is None:
+        return None
+
+    system = (
+        "You summarize open-ended survey comments for a sports academy. "
+        "You must be concise and produce STRICT JSON only."
+    )
+
+    user = f"""
+I will give you survey comments. Find common patterns, rank themes by frequency, and assign criticality based on emotional intensity.
+
+Criticality scale:
+- CRITICAL = threatens to leave / not recommend / strong anger or betrayal
+- HIGH = strong frustration, repeated pain point, clear expectation gap
+- MEDIUM = constructive suggestions, annoyance but not dealbreaker
+- LOW = minor inconvenience
+
+Output STRICT JSON (no markdown, no extra text) with this schema:
+
+{{
+  "criticality_scale": {{
+    "CRITICAL": "...",
+    "HIGH": "...",
+    "MEDIUM": "...",
+    "LOW": "..."
+  }},
+  "themes": [
+    {{
+      "title": "short title",
+      "frequency": "Very high|High|Medium|Low",
+      "criticality": "CRITICAL|HIGH|MEDIUM|LOW",
+      "whats_being_said": "1-2 sentences, max 240 chars",
+      "emotional_signals": ["up to {max_quotes_per_theme} short quotes, max 80 chars each"]
+    }}
+  ],
+  "top_priorities": ["3-6 actionable priorities, short"]
+}}
+
+Rules:
+- Return at most {max_themes} themes.
+- Do NOT repeat the same theme twice (merge similar ones).
+- Keep it tight. Avoid long paragraphs.
+
+Comments:
+{comments_bullets}
+""".strip()
+
+    try:
+        resp = client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_output_tokens=1200,
+        )
+        text = getattr(resp, "output_text", None) or ""
+        data = _extract_first_json_object(text)
+        return data
+    except Exception:
+        return None
+
+
+def _draw_card(
+    ax,
+    x: float,
+    y_top: float,
+    w: float,
+    title: str,
+    meta_line: str,
+    body: str,
+    quotes: List[str],
+    wrap_chars: int,
+    fontsize_title: int = 11,
+    fontsize_body: int = 9,
+) -> float:
+    """
+    Draws a single card with wrapped text.
+    Returns the new y position below the card.
+    """
+    def wrap(s: str, width: int) -> List[str]:
+        if not s:
+            return []
+        return textwrap.wrap(s, width=width)
+
+    lines: List[str] = []
+    lines += wrap(meta_line, wrap_chars)
+    lines += [""]  # spacer
+    lines += wrap("Whats being said: " + (body or ""), wrap_chars)
+    if quotes:
+        lines += [""]  # spacer
+        lines += wrap("Emotional signals:", wrap_chars)
+        for q in quotes[:3]:
+            lines += wrap(f'- "{q}"', wrap_chars)
+
+    # Estimate height
+    line_h = 0.028  # axes fraction per line for fontsize ~9
+    pad = 0.012
+    header_h = 0.05  # room for title
+    card_h = header_h + (len(lines) * line_h) + (2 * pad)
+
+    y_bottom = y_top - card_h
+    rect = patches.FancyBboxPatch(
+        (x, y_bottom),
+        w,
+        card_h,
+        boxstyle="round,pad=0.008",
+        linewidth=0.8,
+        edgecolor="0.2",
+        facecolor="1.0",
+        transform=ax.transAxes,
+    )
+    ax.add_patch(rect)
+
+    # Title
+    ax.text(
+        x + pad,
+        y_top - pad,
+        title,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=fontsize_title,
+        fontweight="bold",
+    )
+
+    # Body
+    ax.text(
+        x + pad,
+        y_top - pad - 0.04,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=fontsize_body,
+    )
+
+    return y_bottom - 0.02
+
+
+def _render_ai_insights_cards_to_pdf(
+    pdf: PdfPages,
+    page_title: str,
+    insights: dict,
+) -> None:
+    """
+    Renders themes as readable cards with wrapping and auto-pagination.
+    """
+    themes = insights.get("themes", []) if isinstance(insights, dict) else []
+    if not themes:
+        return
+
+    top_priorities = insights.get("top_priorities", []) if isinstance(insights, dict) else []
+    crit_scale = insights.get("criticality_scale", {}) if isinstance(insights, dict) else {}
+
+    # Layout
+    left_x = 0.05
+    col_w = 0.43
+    gutter = 0.04
+    right_x = left_x + col_w + gutter
+    top_y = 0.90
+    bottom_y = 0.06
+
+    wrap_chars = 52  # good for 2-column on letter landscape-ish
+    fig = plt.figure(figsize=(11, 8.5))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis("off")
+
+    ax.text(
+        0.5, 0.965, page_title,
+        transform=ax.transAxes, ha="center", va="top",
+        fontsize=16, fontweight="bold",
+    )
+
+    # Criticality scale block (short)
+    scale_lines = []
+    for k in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+        v = crit_scale.get(k, "")
+        if v:
+            scale_lines.append(f"{k}: {v}")
+    if scale_lines:
+        ax.text(
+            0.05, 0.925,
+            "Criticality scale:\n" + "\n".join(scale_lines),
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=9,
+        )
+
+    # Start below the scale
+    y = 0.83
+    x = left_x
+
+    def new_page():
+        nonlocal fig, ax, y, x
+        pdf.savefig(fig)
+        plt.close(fig)
+        fig = plt.figure(figsize=(11, 8.5))
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.axis("off")
+        ax.text(
+            0.5, 0.965, page_title,
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=16, fontweight="bold",
+        )
+        y = 0.92
+        x = left_x
+
+    # Theme cards
+    for i, t in enumerate(themes, start=1):
+        title = f"{i}. {str(t.get('title', '')).strip()}"
+        freq = str(t.get("frequency", "")).strip()
+        crit = str(t.get("criticality", "")).strip()
+        meta_line = f"Frequency: {freq} | Criticality: {crit}"
+        body = str(t.get("whats_being_said", "")).strip()
+        quotes = t.get("emotional_signals", [])
+        if not isinstance(quotes, list):
+            quotes = []
+
+        # If we are too low, switch column or page
+        if y < bottom_y + 0.15:
+            if x == left_x:
+                x = right_x
+                y = 0.83
+            else:
+                new_page()
+
+        y_next = _draw_card(
+            ax=ax,
+            x=x,
+            y_top=y,
+            w=col_w,
+            title=title,
+            meta_line=meta_line,
+            body=body,
+            quotes=[str(q) for q in quotes if str(q).strip()],
+            wrap_chars=wrap_chars,
+        )
+
+        # If card overflowed below bottom, redo it on next column/page
+        if y_next < bottom_y:
+            # Undo by starting new column/page and drawing again
+            if x == left_x:
+                x = right_x
+                y = 0.83
+            else:
+                new_page()
+            y = _draw_card(
+                ax=ax,
+                x=x,
+                y_top=y,
+                w=col_w,
+                title=title,
+                meta_line=meta_line,
+                body=body,
+                quotes=[str(q) for q in quotes if str(q).strip()],
+                wrap_chars=wrap_chars,
+            )
+        else:
+            y = y_next
+
+    # Top priorities at the end (new page if needed)
+    if top_priorities:
+        if x == right_x and y < 0.25:
+            new_page()
+
+        ax.text(
+            0.05, y,
+            "Top priorities:",
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=12, fontweight="bold",
+        )
+        y -= 0.04
+        bullets = "\n".join([f"- {str(p).strip()}" for p in top_priorities[:6] if str(p).strip()])
+        ax.text(
+            0.05, y,
+            bullets,
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=10,
+        )
+
+    pdf.savefig(fig)
+    plt.close(fig)
 
 #End AI Helpers
 #----------------------------
@@ -1175,44 +1599,52 @@ def _add_all_teams_comments_insights_page_to_pdf(
     cycle_label: str,
     model: str = "gpt-5-mini",
     chunk_size: int = 60,
+    max_themes: int = 10,
 ) -> None:
-    client = _try_get_openai_client()
-    if client is None:
-        return  # AI disabled or missing key/package
+    """
+    Creates clean, readable AI insight pages for All Teams.
+    Uses a concise JSON response and renders it as cards with wrapping + auto pagination.
+    """
 
-    comment_cols = _infer_comment_col_indices(profile, df)
-    if not comment_cols:
+    comments_bullets = _collect_comments_text(profile, df)
+    if not comments_bullets.strip():
         return
 
-    comments = _collect_comments(df, comment_cols)
-    if not comments:
+    # If you have tons of comments, chunk them and then summarize the combined chunk summaries.
+    lines = [ln for ln in comments_bullets.splitlines() if ln.strip().startswith("- ")]
+    if chunk_size <= 0:
+        chunk_size = 60
+
+    chunk_jsons: List[dict] = []
+    for start in range(0, len(lines), chunk_size):
+        chunk = "\n".join(lines[start : start + chunk_size])
+        chunk_data = _openai_summarize_comments_to_json(
+            comments_bullets=chunk,
+            model=model,
+            max_themes=min(8, max_themes),
+            max_quotes_per_theme=2,
+        )
+        if chunk_data:
+            chunk_jsons.append(chunk_data)
+
+    if not chunk_jsons:
         return
 
-    text = _llm_summarize_comments(client, comments, model=model, chunk_size=chunk_size)
-    if not text.strip():
-        return
+    # Reduce step: merge chunk outputs into one final output
+    if len(chunk_jsons) == 1:
+        final = chunk_jsons[0]
+    else:
+        reduce_input = json.dumps(chunk_jsons, ensure_ascii=True)
+        reduce_bullets = f"- Chunk summaries JSON:\n{reduce_input}"
+        final = _openai_summarize_comments_to_json(
+            comments_bullets=reduce_bullets,
+            model=model,
+            max_themes=max_themes,
+            max_quotes_per_theme=3,
+        ) or chunk_jsons[0]
 
-    # Render as a clean text page
-    fig = plt.figure(figsize=(11, 8.5))
-    ax = fig.add_subplot(111)
-    ax.axis("off")
-
-    title = f"All Teams - {cycle_label} - Comments Insights"
-    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
-
-    wrapped = textwrap.fill(text, width=110)
-    ax.text(
-        0.02, 0.98,
-        wrapped,
-        ha="left", va="top",
-        fontsize=9,
-        family="monospace",
-        transform=ax.transAxes,
-    )
-
-    fig.tight_layout()
-    pdf.savefig(fig)
-    plt.close(fig)
+    page_title = f"All Teams - {cycle_label} - Comments Insights"
+    _render_ai_insights_cards_to_pdf(pdf, page_title=page_title, insights=final)
 
 
 
