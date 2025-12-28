@@ -8,7 +8,7 @@ import streamlit as st
 
 from pdf_report import create_pdf_report
 
-st.set_page_config(page_title="Soccer Central Quality Control", layout="centered")
+st.set_page_config(page_title="Soccer Central AI Quality Control", layout="centered")
 
 st.title("Soccer Central Quality Control")
 st.caption("Upload a survey export (.xlsx) and generate the PDF report.")
