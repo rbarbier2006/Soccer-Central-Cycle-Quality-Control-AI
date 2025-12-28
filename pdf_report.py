@@ -294,6 +294,9 @@ def _llm_summarize_comments(client, comments: List[str], model: str, chunk_size:
     final = call_one(partials, merge_mode=True)
     return final
 
+#End AI Helpers
+#----------------------------
+
 
 
 # -----------------------------
