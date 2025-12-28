@@ -10,7 +10,7 @@ from pdf_report import create_pdf_report
 
 st.set_page_config(page_title="Soccer Central AI Quality Control", layout="centered")
 
-st.title("Soccer Central Quality Control")
+st.title("Soccer Central AI Quality Control")
 st.caption("Upload a survey export (.xlsx) and generate the PDF report.")
 
 survey_type = st.selectbox("Survey type", ["players", "families"], index=0)
