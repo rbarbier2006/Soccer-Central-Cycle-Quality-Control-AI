@@ -297,14 +297,6 @@ def _llm_summarize_comments(client, comments: List[str], model: str, chunk_size:
 #End AI Helpers
 #----------------------------
 
-#test helper
-def _add_debug_page(pdf, text: str) -> None:
-    fig = plt.figure(figsize=(11, 8.5))
-    plt.axis("off")
-    fig.text(0.5, 0.5, text, ha="center", va="center", fontsize=28, fontweight="bold")
-    pdf.savefig(fig)
-    plt.close(fig)
-
 
 # -----------------------------
 # Builders for low ratings / NO answers
@@ -1316,7 +1308,6 @@ def create_pdf_report(
             chunk_size=60,
         )
 
-        _add_debug_page(pdf, "DEBUG: AI PAGE SHOULD BE HERE")
 
 
         for team in qq_sorted_teams:
