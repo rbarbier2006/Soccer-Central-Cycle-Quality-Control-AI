@@ -1038,7 +1038,7 @@ def _add_group_tables_page_to_pdf(
 
 
 # -----------------------------
-# Page: cycle summary (page 1)
+# Page: cycle summary (page 1)  -  AI Addition
 # -----------------------------
 def _add_cycle_summary_page(
     pdf: PdfPages,
@@ -1169,6 +1169,56 @@ def _add_cycle_summary_page(
     plt.close(fig)
 
 
+def _add_all_teams_comments_insights_page_to_pdf(
+    pdf: PdfPages,
+    profile: SurveyProfile,
+    df: pd.DataFrame,
+    cycle_label: str,
+    model: str = "gpt-5-mini",
+    chunk_size: int = 60,
+) -> None:
+    client = _try_get_openai_client()
+    if client is None:
+        return  # AI disabled or missing key/package
+
+    comment_cols = _infer_comment_col_indices(profile, df)
+    if not comment_cols:
+        return
+
+    comments = _collect_comments(df, comment_cols)
+    if not comments:
+        return
+
+    text = _llm_summarize_comments(client, comments, model=model, chunk_size=chunk_size)
+    if not text.strip():
+        return
+
+    # Render as a clean text page
+    fig = plt.figure(figsize=(11, 8.5))
+    ax = fig.add_subplot(111)
+    ax.axis("off")
+
+    title = f"All Teams - {cycle_label} - Comments Insights"
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+
+    wrapped = textwrap.fill(text, width=110)
+    ax.text(
+        0.02, 0.98,
+        wrapped,
+        ha="left", va="top",
+        fontsize=9,
+        family="monospace",
+        transform=ax.transAxes,
+    )
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+
+
+
 # -----------------------------
 # Main entry
 # -----------------------------
@@ -1248,6 +1298,16 @@ def create_pdf_report(
         all_meta = _build_plot_metadata(profile, df)
         _add_group_charts_page_to_pdf(pdf, profile, df, "All Teams", cycle_label, all_meta)
         _add_group_tables_page_to_pdf(pdf, profile, df, "All Teams", cycle_label, all_meta, is_all_teams=True)
+
+        # AI page (All Teams only)
+        _add_all_teams_comments_insights_page_to_pdf(
+            pdf,
+            profile,
+            df,
+            cycle_label=cycle_label,
+            model="gpt-5-mini",
+            chunk_size=60,
+        )
 
         for team in qq_sorted_teams:
             group_df = grouped.get(team)
