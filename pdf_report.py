@@ -12,6 +12,16 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from profiles import SurveyProfile, PROFILES
 
+import json
+from collections import defaultdict
+import os
+import streamlit as st
+
+# Load key from Streamlit secrets into env var so the OpenAI SDK can find it
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+
+
 # -----------------------------
 # Constants
 # -----------------------------
@@ -114,6 +124,176 @@ def _normalize_group_column_inplace(df: pd.DataFrame, profile: SurveyProfile) ->
     )
     df.loc[df[group_col_name] == "", group_col_name] = profile.unassigned_label
     return group_col_name
+
+#---------------------------
+#AI Helpers
+#--------------------------
+def _is_meaningful_comment(s: str) -> bool:
+    if s is None:
+        return False
+    t = str(s).strip()
+    if not t:
+        return False
+    low = t.lower()
+    junk = {"no", "none", "n/a", "na", "nope", "nothing", "nil"}
+    if low in junk:
+        return False
+    # too short usually not useful
+    if len(t) < 8:
+        return False
+    return True
+
+
+def _infer_comment_col_indices(profile: SurveyProfile, df: pd.DataFrame) -> List[int]:
+    """
+    Prefer profile.comment_col_indices if it exists.
+    Otherwise infer by header keywords + content shape.
+    """
+    # If you add comment_col_indices into profiles.py later, this will auto-use it:
+    idxs = getattr(profile, "comment_col_indices", None)
+    if idxs:
+        return [i for i in idxs if 0 <= int(i) < len(df.columns)]
+
+    keywords = ("comment", "feedback", "suggest", "why", "explain", "anything else", "notes", "improve")
+    candidate = []
+    for i, col in enumerate(df.columns):
+        name = str(col).strip().lower()
+        if any(k in name for k in keywords):
+            candidate.append(i)
+
+    # Fallback heuristic: object columns with average string length reasonably large
+    if not candidate:
+        for i, col in enumerate(df.columns):
+            if i in (profile.group_col_index, profile.respondent_name_index):
+                continue
+            # skip known structured columns
+            if i in (profile.rating_col_indices or []):
+                continue
+            if i in (profile.yesno_col_indices or []):
+                continue
+            if profile.choice_col_index is not None and i == int(profile.choice_col_index):
+                continue
+
+            series = df.iloc[:, i].dropna().astype(str).str.strip()
+            if series.empty:
+                continue
+            avg_len = float(series.map(len).mean())
+            if avg_len >= 25:  # looks like real free-text
+                candidate.append(i)
+
+    return sorted(set(candidate))
+
+
+def _collect_comments(df: pd.DataFrame, col_indices: List[int]) -> List[str]:
+    out = []
+    for idx in col_indices:
+        if idx < 0 or idx >= len(df.columns):
+            continue
+        series = df.iloc[:, idx].fillna("").astype(str).map(lambda x: x.strip())
+        for val in series.tolist():
+            if _is_meaningful_comment(val):
+                out.append(val)
+
+    # de-dup while preserving order
+    seen = set()
+    dedup = []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            dedup.append(s)
+    return dedup
+
+
+def _try_get_openai_client():
+    """
+    Lazy import so the report still works with AI disabled or missing package.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+        return OpenAI()
+    except Exception:
+        return None
+
+
+def _safe_json_loads(s: str) -> Optional[dict]:
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        # Sometimes the model wraps JSON in text; try to extract first {...}
+        m = re.search(r"\{.*\}", s, flags=re.DOTALL)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return None
+
+
+def _llm_summarize_comments(client, comments: List[str], model: str, chunk_size: int) -> str:
+    """
+    Returns a single formatted markdown-ish string (we will render it as text in the PDF).
+    If too many comments, chunk and then merge.
+    """
+    if not comments:
+        return ""
+
+    def call_one(payload_comments: List[str], merge_mode: bool = False) -> str:
+        scale = (
+            "Criticality scale:\n"
+            "CRITICAL = threatens to leave / not recommend / strong anger or betrayal\n"
+            "HIGH = strong frustration, repeated pain point, clear expectation gap\n"
+            "MEDIUM = constructive suggestions, annoyance but not dealbreaker\n"
+            "LOW = minor inconvenience\n"
+        )
+
+        if not merge_mode:
+            user_input = "SURVEY COMMENTS:\n" + "\n".join([f"- {c}" for c in payload_comments])
+            instructions = (
+                "You analyze survey comments for a sports academy.\n"
+                "Task:\n"
+                "1) Identify common themes.\n"
+                "2) Rank themes from most frequent to least frequent.\n"
+                "3) Assign a Criticality label using the scale.\n"
+                "4) For each theme include: Frequency (Very high/High/Medium/Low), Criticality, "
+                "Whats being said, Emotional signals (short list of phrases).\n"
+                "Output format:\n"
+                "Start with the criticality scale, then list 8-12 themes.\n"
+                "Keep it structured with headings.\n"
+            )
+        else:
+            user_input = "MERGE THESE PARTIAL SUMMARIES INTO ONE CONSOLIDATED REPORT:\n" + "\n\n".join(payload_comments)
+            instructions = (
+                "You are merging multiple partial theme summaries into one final report.\n"
+                "Deduplicate overlapping themes, keep the strongest wording, and re-rank by overall frequency.\n"
+                "Use the same output format as before.\n"
+            )
+
+        response = client.responses.create(
+            model=model,
+            instructions=instructions,
+            input=scale + "\n" + user_input,
+        )
+        return getattr(response, "output_text", "") or ""
+
+    # Small enough: one shot
+    if len(comments) <= chunk_size:
+        return call_one(comments, merge_mode=False)
+
+    # Chunk + merge
+    partials = []
+    for start in range(0, len(comments), chunk_size):
+        chunk = comments[start:start + chunk_size]
+        partials.append(call_one(chunk, merge_mode=False))
+
+    # Merge in one final call (merge summaries are much shorter than raw comments)
+    final = call_one(partials, merge_mode=True)
+    return final
+
 
 
 # -----------------------------
