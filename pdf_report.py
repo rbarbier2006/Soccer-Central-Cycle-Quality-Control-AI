@@ -1,4 +1,5 @@
 
+
 # pdf_report.py
 import os
 import re
@@ -664,213 +665,138 @@ def _build_plot_metadata(profile: SurveyProfile, df_group: pd.DataFrame) -> List
 # -----------------------------
 # Page: charts grid (page 1 per group)
 # -----------------------------
-def _add_comments_insights_cards_to_pdf(
-    pdf,                 # PdfPages
-    title: str,
-    insights: CommentsInsights,
-    themes_per_page: int = 6,
+def _add_group_charts_page_to_pdf(
+    pdf: PdfPages,
+    profile: SurveyProfile,
+    df_group: pd.DataFrame,
+    title_label: str,
+    cycle_label: str,
+    plots_meta: List[Dict[str, Any]],
 ) -> None:
-    if insights is None or not getattr(insights, "themes", None):
+    if not plots_meta:
         return
 
-    # Helpers -------------------------------------------------
-    def wrap_lines(s: str, width: int) -> List[str]:
-        s = (s or "").strip()
-        return textwrap.wrap(s, width=width) if s else []
+    n_resp = _get_unique_respondent_count(df_group, profile.respondent_name_index)
+    noun = profile.respondent_singular if n_resp == 1 else profile.respondent_plural
+    n_text = f" ({n_resp} {noun})"
 
-    def draw_wrapped_bullet(ax, x: float, y: float, text: str, width: int, fs: float, line_h: float) -> float:
-        """
-        Draw a bullet that can wrap across lines. Returns new y after drawing.
-        """
-        lines = wrap_lines(text, width=width)
-        if not lines:
-            return y
+    n_plots = len(plots_meta)
 
-        # first line with bullet
-        ax.text(x, y, "- " + lines[0], ha="left", va="top", fontsize=fs, transform=ax.transAxes)
-        y -= line_h
+    if n_plots <= 4:
+        ncols = 2
+    elif n_plots <= 9:
+        ncols = 3
+    else:
+        ncols = 4
 
-        # continuation lines indented
-        for ln in lines[1:]:
-            ax.text(x + 0.02, y, ln, ha="left", va="top", fontsize=fs, transform=ax.transAxes)
-            y -= line_h
+    nrows = int(np.ceil(n_plots / ncols))
 
-        return y
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(11, 8.5))
 
-    # ---------------------------------------------------------
-    themes = list(insights.themes)
-    chunks = [themes[i:i + themes_per_page] for i in range(0, len(themes), themes_per_page)]
+    axes = np.array(axes)
+    if axes.ndim == 0:
+        axes = axes.reshape(1, 1)
+    elif axes.ndim == 1:
+        if nrows == 1:
+            axes = axes.reshape(1, ncols)
+        else:
+            axes = axes.reshape(nrows, 1)
 
-    for page_i, page_themes in enumerate(chunks, start=1):
-        fig = plt.figure(figsize=(11, 8.5))
-        ax = fig.add_subplot(111)
+    axes_flat = axes.flatten()
+
+    for ax in axes_flat[n_plots:]:
         ax.axis("off")
 
-        header = title if len(chunks) == 1 else f"{title} (Page {page_i}/{len(chunks)})"
-        ax.text(0.02, 0.97, header, ha="left", va="top",
-                fontsize=16, fontweight="bold", transform=ax.transAxes)
+    y_label = f"{profile.respondent_singular.capitalize()} Count"
 
-        # -----------------------------
-        # Top priorities (NO overlap)
-        # -----------------------------
-        cursor_y = 0.92
-        if page_i == 1 and (insights.top_priorities or []):
-            ax.text(0.02, cursor_y, "Top priorities", ha="left", va="top",
-                    fontsize=12, fontweight="bold", transform=ax.transAxes)
-            cursor_y -= 0.032
+    # Better wrapping for long Excel headers + smaller font
+    wrap_width = 32 if ncols == 4 else 50
+    title_fs = 6 if ncols == 4 else 7  # small enough to fit long questions
 
-            # line spacing tuned for fontsize ~10
-            pri_fs = 10
-            pri_line_h = 0.024
+    for ax, meta in zip(axes_flat, plots_meta):
+        ptype = meta["ptype"]
+        idx = meta["idx"]
+        number = meta["number"]
 
-            # cap count AND cap total lines so it never eats the whole page
-            max_items = 6
-            max_total_lines = 12
-            total_lines_used = 0
+        # Big chart number in corner stays the same
+        ax.text(
+            0.02, 0.98, str(number),
+            transform=ax.transAxes,
+            ha="left", va="top",
+            fontsize=10, fontweight="bold",
+        )
 
-            for p in (insights.top_priorities or [])[:max_items]:
-                before = cursor_y
+        # THE FIX:
+        # Always pull the title from the original Excel header in df_group (NOT profile.chart_labels)
+        try:
+            display_title = str(df_group.columns[idx])
+        except Exception:
+            display_title = str(meta.get("col_name", ""))
 
-                # estimate how many lines this bullet will take
-                est_lines = max(1, len(wrap_lines(p, width=95)))
-                if total_lines_used + est_lines > max_total_lines:
-                    break
+        wrapped_title = textwrap.fill(display_title, width=wrap_width)
 
-                cursor_y = draw_wrapped_bullet(
-                    ax=ax,
-                    x=0.03,
-                    y=cursor_y,
-                    text=str(p),
-                    width=95,
-                    fs=pri_fs,
-                    line_h=pri_line_h,
-                )
+        if ptype == "rating":
+            series = pd.to_numeric(df_group.iloc[:, idx], errors="coerce").dropna()
+            counts = series.value_counts().reindex([1, 2, 3, 4, 5], fill_value=0)
 
-                used = int(round((before - cursor_y) / pri_line_h))
-                total_lines_used += max(1, used)
+            ax.bar([1, 2, 3, 4, 5], counts.values)
 
-            # add a little breathing room before cards
-            cursor_y -= 0.015
-
-        # -----------------------------
-        # Cards layout (NO overlap)
-        # -----------------------------
-        # If priorities took space, start cards lower automatically.
-        cards_top_y = 0.90 if (page_i != 1 or not (insights.top_priorities or [])) else cursor_y
-
-        left_x, right_x = 0.02, 0.51
-        card_w = 0.47
-        gap_y = 0.018
-
-        # Make card height dynamic so 3 rows always fit in the remaining space.
-        bottom_margin = 0.08
-        available_h = max(0.40, cards_top_y - bottom_margin)
-        card_h = (available_h - 2 * gap_y) / 3.0
-        card_h = max(0.11, min(0.155, card_h))  # clamp to readable range
-
-        # Start at the top of the first row
-        y_row_top = cards_top_y
-        col = 0
-        base_idx = (page_i - 1) * themes_per_page
-
-        # Text tuning inside cards
-        title_fs = 11
-        meta_fs = 9
-        body_fs = 9
-        body_line_h = 0.022  # axes coords (works well at fs=9)
-        wrap_w_title = 52
-        wrap_w_body = 72
-
-        for j, t in enumerate(page_themes, start=1):
-            idx = base_idx + j
-            x = left_x if col == 0 else right_x
-
-            style = _crit_style(getattr(t, "criticality", "LOW"))
-            rect = patches.FancyBboxPatch(
-                (x, y_row_top - card_h),
-                card_w, card_h,
-                boxstyle="round,pad=0.008,rounding_size=0.01",
-                linewidth=1.2,
-                edgecolor=style["edge"],
-                facecolor=style["face"],
-                transform=ax.transAxes,
-            )
-            ax.add_patch(rect)
-
-            # Card content as a flowing cursor (prevents overlap)
-            pad_x = 0.012
-            pad_y = 0.014
-            text_x = x + pad_x
-            top_y = y_row_top - pad_y
-            bottom_y = (y_row_top - card_h) + pad_y
-
-            # Title
-            title_line = f"{idx}) {getattr(t, 'title', '').strip()}"
-            title_lines = wrap_lines(title_line, wrap_w_title)[:2]  # hard cap 2 lines
-            cur = top_y
-            for ln in title_lines:
-                txt = ax.text(text_x, cur, ln, ha="left", va="top",
-                              fontsize=title_fs, fontweight="bold", transform=ax.transAxes)
-                txt.set_clip_path(rect)
-                cur -= 0.030
-
-            # Meta
-            meta_line = f"Frequency: {getattr(t, 'frequency', '')}   |   Criticality: {getattr(t, 'criticality', '')}"
-            txt = ax.text(text_x, cur, meta_line, ha="left", va="top",
-                          fontsize=meta_fs, transform=ax.transAxes)
-            txt.set_clip_path(rect)
-            cur -= 0.028
-
-            # Body (flow, then truncate if needed)
-            whats = (getattr(t, "whats_being_said", "") or "").strip()
-            body_lines = wrap_lines(whats, wrap_w_body)
-
-            emos = getattr(t, "emotional_signals", []) or []
-            emo_line = ""
-            if emos:
-                emo_line = "Signals: " + ", ".join([str(e).strip() for e in emos[:6] if str(e).strip()])
-            emo_lines = wrap_lines(emo_line, wrap_w_body) if emo_line else []
-
-            # Reserve space for signals if they exist (at least 1 line)
-            reserve = (len(emo_lines) * body_line_h + 0.010) if emo_lines else 0.0
-
-            for ln in body_lines:
-                if cur - body_line_h < (bottom_y + reserve):
-                    # not enough room, stop body
-                    break
-                txt = ax.text(text_x, cur, ln, ha="left", va="top",
-                              fontsize=body_fs, transform=ax.transAxes)
-                txt.set_clip_path(rect)
-                cur -= body_line_h
-
-            # Signals (only if room)
-            if emo_lines:
-                cur -= 0.008
-                for ln in emo_lines:
-                    if cur - body_line_h < bottom_y:
-                        break
-                    txt = ax.text(text_x, cur, ln, ha="left", va="top",
-                                  fontsize=8.5, transform=ax.transAxes)
-                    txt.set_clip_path(rect)
-                    cur -= body_line_h
-
-            # next slot
-            if col == 1:
-                y_row_top -= (card_h + gap_y)
-                col = 0
+            avg = series.mean() if not series.empty else None
+            if avg is None or np.isnan(avg):
+                title = wrapped_title
             else:
-                col = 1
+                title = f"{wrapped_title}\n(Avg = {avg:.2f})"
 
-        # Notes only on last page (optional)
-        if page_i == len(chunks) and getattr(insights, "notes", "").strip():
-            ax.text(0.02, 0.06, "Notes", ha="left", va="top",
-                    fontsize=11, fontweight="bold", transform=ax.transAxes)
-            ax.text(0.02, 0.035, textwrap.fill(insights.notes.strip(), width=120),
-                    ha="left", va="top", fontsize=9, transform=ax.transAxes)
+            ax.set_title(title, fontsize=title_fs)
+            ax.set_xlabel("# of Stars", fontsize=8)
+            ax.set_ylabel(y_label, fontsize=8)
+            ax.tick_params(labelsize=8)
+            ax.set_ylim(0, max(counts.values.tolist() + [1]) * 1.2)
 
-        fig.tight_layout()
-        pdf.savefig(fig)
-        plt.close(fig)
+        elif ptype == "yesno":
+            series = _clean_series_as_str_keep_len(df_group.iloc[:, idx]).str.upper()
+            yes_count = int(series.isin(YES_SET).sum())
+            no_count = int(series.isin(NO_SET).sum())
+
+            data = [yes_count, no_count]
+            labels = ["YES", "NO"]
+
+            if yes_count + no_count == 0:
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=9)
+                ax.axis("off")
+            else:
+                def make_label(pct, allvals=data):
+                    total = sum(allvals)
+                    count = int(round(pct * total / 100.0)) if total else 0
+                    return f"{pct:.0f}%, {count}"
+
+                ax.pie(data, labels=labels, autopct=make_label, textprops={"fontsize": 8})
+                ax.set_title(wrapped_title, fontsize=title_fs)
+
+        elif ptype == "choice":
+            series = df_group.iloc[:, idx].dropna().astype(str).str.strip()
+            counts = series.value_counts()
+            data = counts.values
+            labels = counts.index.tolist()
+
+            if len(data) == 0:
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", fontsize=9)
+                ax.axis("off")
+            else:
+                def make_label(pct, allvals=data):
+                    total = sum(allvals)
+                    count = int(round(pct * total / 100.0)) if total else 0
+                    return f"{pct:.0f}%, {count}"
+
+                ax.pie(data, labels=labels, autopct=make_label, textprops={"fontsize": 8})
+                ax.set_title(wrapped_title, fontsize=title_fs)
+
+    full_title = _compose_group_title(profile, title_label, cycle_label) + n_text
+    fig.suptitle(full_title, fontsize=14, fontweight="bold")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    pdf.savefig(fig)
+    plt.close(fig)
 
 
 
@@ -1610,3 +1536,4 @@ def create_pdf_from_original(
         survey_type="players",
         output_path=output_path,
     )
+
