@@ -459,7 +459,7 @@ def _add_comments_insights_cards_to_pdf(
     #per_page_first = 2 if (verbose_mode and has_priorities) else min(per_page_other, 4)
     # Layout strategy
     # Keep the first page smaller because Top priorities takes space.
-    per_page_first = 2 if (verbose_mode and has_priorities) else 4
+    per_page_first = 4 if (verbose_mode and has_priorities) else 6
     
     # Every other page: 6 cards (3 rows x 2 cols)
     per_page_other = 6
