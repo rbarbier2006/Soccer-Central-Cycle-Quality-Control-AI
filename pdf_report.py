@@ -256,65 +256,102 @@ def _safe_json_loads(s: str) -> Optional[dict]:
             return None
 
 
-def _llm_summarize_comments(client, comments: List[str], model: str, chunk_size: int) -> str:
-    """
-    Returns a single formatted markdown-ish string (we will render it as text in the PDF).
-    If too many comments, chunk and then merge.
-    """
+def _llm_summarize_comments_structured(
+    client,
+    comments: List[str],
+    model: str,
+    chunk_size: int,
+) -> Optional[CommentsInsights]:
     if not comments:
-        return ""
+        return None
 
-    def call_one(payload_comments: List[str], merge_mode: bool = False) -> str:
-        scale = (
-            "Criticality scale:\n"
-            "CRITICAL = threatens to leave / not recommend / strong anger or betrayal\n"
-            "HIGH = strong frustration, repeated pain point, clear expectation gap\n"
-            "MEDIUM = constructive suggestions, annoyance but not dealbreaker\n"
-            "LOW = minor inconvenience\n"
-        )
+    scale = (
+        "Criticality scale:\n"
+        "CRITICAL = threatens to leave / not recommend / strong anger or betrayal\n"
+        "HIGH = strong frustration, repeated pain point, clear expectation gap\n"
+        "MEDIUM = constructive suggestions, annoyance but not dealbreaker\n"
+        "LOW = minor inconvenience\n"
+    )
 
-        if not merge_mode:
-            user_input = "SURVEY COMMENTS:\n" + "\n".join([f"- {c}" for c in payload_comments])
-            instructions = (
-                "You analyze survey comments for a sports academy.\n"
-                "Task:\n"
-                "1) Identify common themes.\n"
-                "2) Rank themes from most frequent to least frequent.\n"
-                "3) Assign a Criticality label using the scale.\n"
-                "4) For each theme include: Frequency (Very high/High/Medium/Low), Criticality, "
-                "Whats being said, Emotional signals (short list of phrases).\n"
-                "Output format:\n"
-                "Start with the criticality scale, then list 8-12 themes.\n"
-                "Keep it structured with headings.\n"
+    system_msg = (
+        "You analyze survey comments for a sports academy and produce a structured summary.\n"
+        "Return 8-12 themes ranked by frequency.\n"
+        "Each theme must be concise and actionable.\n"
+        "Do not repeat the same theme with different wording.\n"
+    )
+
+    def one_pass(input_comments: List[str]) -> Optional[CommentsInsights]:
+        user_msg = "SURVEY COMMENTS:\n" + "\n".join([f"- {c}" for c in input_comments])
+
+        # Preferred: Structured Outputs parse (SDK supports Pydantic schemas). :contentReference[oaicite:2]{index=2}
+        try:
+            resp = client.responses.parse(
+                model=model,
+                input=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": scale + "\n" + user_msg},
+                ],
+                text_format=CommentsInsights,
             )
-        else:
-            user_input = "MERGE THESE PARTIAL SUMMARIES INTO ONE CONSOLIDATED REPORT:\n" + "\n\n".join(payload_comments)
-            instructions = (
-                "You are merging multiple partial theme summaries into one final report.\n"
-                "Deduplicate overlapping themes, keep the strongest wording, and re-rank by overall frequency.\n"
-                "Use the same output format as before.\n"
+            return resp.output_parsed
+        except Exception:
+            # Fallback: plain text -> attempt JSON extraction (less reliable)
+            resp = client.responses.create(
+                model=model,
+                instructions=system_msg,
+                input=scale + "\n" + user_msg + "\n\nReturn JSON that matches the schema.",
             )
+            raw = getattr(resp, "output_text", "") or ""
+            data = _safe_json_loads(raw)
+            if not data:
+                return None
+            try:
+                return CommentsInsights.model_validate(data)
+            except Exception:
+                return None
 
-        response = client.responses.create(
-            model=model,
-            instructions=instructions,
-            input=scale + "\n" + user_input,
-        )
-        return getattr(response, "output_text", "") or ""
-
-    # Small enough: one shot
+    # One shot
     if len(comments) <= chunk_size:
-        return call_one(comments, merge_mode=False)
+        return one_pass(comments)
 
-    # Chunk + merge
-    partials = []
+    # Chunk
+    partials: List[CommentsInsights] = []
     for start in range(0, len(comments), chunk_size):
         chunk = comments[start:start + chunk_size]
-        partials.append(call_one(chunk, merge_mode=False))
+        out = one_pass(chunk)
+        if out:
+            partials.append(out)
 
-    # Merge in one final call (merge summaries are much shorter than raw comments)
-    final = call_one(partials, merge_mode=True)
-    return final
+    if not partials:
+        return None
+
+    # Merge partials locally (dedupe by title-ish)
+    # You can also do an LLM merge, but local merge is cheaper + predictable.
+    merged = CommentsInsights(top_priorities=[], themes=[], notes="")
+    seen_titles = set()
+
+    # collect priorities
+    for p in partials:
+        for item in p.top_priorities:
+            if item and item not in merged.top_priorities and len(merged.top_priorities) < 6:
+                merged.top_priorities.append(item)
+
+    # merge themes (keep earlier ones first; they are "ranked")
+    for p in partials:
+        for t in p.themes:
+            key = t.title.strip().lower()
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            merged.themes.append(t)
+            if len(merged.themes) >= 12:
+                break
+        if len(merged.themes) >= 12:
+            break
+
+    # notes
+    merged.notes = partials[0].notes if partials[0].notes else ""
+    return merged
 
 
 #End AI Helpers
