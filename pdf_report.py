@@ -1228,6 +1228,14 @@ def _add_cycle_summary_page(
     plt.close(fig)
 
 
+def _wrap(s: str, width: int) -> str:
+    s = (s or "").strip()
+    return textwrap.fill(s, width=width)
+
+def _crit_rank(c: str) -> int:
+    order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    return order.get((c or "").strip().upper(), 9)
+
 def _add_all_teams_comments_insights_page_to_pdf(
     pdf: PdfPages,
     profile: SurveyProfile,
@@ -1238,7 +1246,7 @@ def _add_all_teams_comments_insights_page_to_pdf(
 ) -> None:
     client = _try_get_openai_client()
     if client is None:
-        return  # AI disabled or missing key/package
+        return
 
     comment_cols = _infer_comment_col_indices(profile, df)
     if not comment_cols:
@@ -1248,34 +1256,140 @@ def _add_all_teams_comments_insights_page_to_pdf(
     if not comments:
         return
 
-    text = _llm_summarize_comments(client, comments, model=model, chunk_size=chunk_size)
-    if not text.strip():
+    insights = _llm_summarize_comments_structured(client, comments, model=model, chunk_size=chunk_size)
+    if not insights or not insights.themes:
         return
 
-    # Render as a clean text page
+    # -------------------------
+    # Page 1: Executive summary
+    # -------------------------
     fig = plt.figure(figsize=(11, 8.5))
     ax = fig.add_subplot(111)
     ax.axis("off")
 
     title = f"All Teams - {cycle_label} - Comments Insights"
-    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+    ax.text(0.5, 0.96, title, ha="center", va="top", fontsize=16, fontweight="bold", transform=ax.transAxes)
 
-    wrapped = textwrap.fill(text, width=110)
     ax.text(
-        0.02, 0.98,
-        wrapped,
-        ha="left", va="top",
-        fontsize=9,
-        family="monospace",
-        transform=ax.transAxes,
+        0.02, 0.90,
+        f"Source: {len(comments)} meaningful comments (deduplicated).",
+        ha="left", va="top", fontsize=10, transform=ax.transAxes
     )
 
-    fig.tight_layout()
+    # Criticality scale box
+    scale_text = (
+        "Criticality scale\n"
+        "CRITICAL: threatens to leave / not recommend / strong anger\n"
+        "HIGH: strong frustration, repeated pain point, expectation gap\n"
+        "MEDIUM: constructive suggestions, annoyance not dealbreaker\n"
+        "LOW: minor inconvenience\n"
+    )
+    box = patches.FancyBboxPatch(
+        (0.02, 0.72), 0.96, 0.15,
+        boxstyle="round,pad=0.012",
+        linewidth=1.0,
+        facecolor="#F5F5F5",
+        transform=ax.transAxes
+    )
+    ax.add_patch(box)
+    ax.text(0.04, 0.85, scale_text, ha="left", va="top", fontsize=9, transform=ax.transAxes)
+
+    # Top priorities
+    ax.text(0.02, 0.68, "Top priorities", ha="left", va="top", fontsize=13, fontweight="bold", transform=ax.transAxes)
+    y = 0.64
+    for i, p in enumerate(insights.top_priorities[:6], start=1):
+        ax.text(0.04, y, f"{i}. {_wrap(p, 105)}", ha="left", va="top", fontsize=10, transform=ax.transAxes)
+        y -= 0.05
+
+    # Themes overview table (compact)
+    overview = []
+    for t in insights.themes[:10]:
+        overview.append([t.title, t.frequency, t.criticality])
+
+    ax.text(0.02, 0.34, "Themes overview (top 10)", ha="left", va="top", fontsize=13, fontweight="bold", transform=ax.transAxes)
+    tbl_ax = fig.add_axes([0.02, 0.05, 0.96, 0.26])
+    tbl_ax.axis("off")
+    tbl = tbl_ax.table(
+        cellText=overview,
+        colLabels=["Theme", "Frequency", "Criticality"],
+        loc="upper left",
+        colWidths=[0.72, 0.14, 0.14],
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.scale(1.0, 1.4)
+
     pdf.savefig(fig)
     plt.close(fig)
 
+    # -------------------------
+    # Page 2+: Theme cards
+    # -------------------------
+    themes_sorted = sorted(insights.themes, key=lambda t: (_crit_rank(t.criticality), t.title.lower()))
 
+    cards_per_page = 4
+    for page_start in range(0, len(themes_sorted), cards_per_page):
+        page = themes_sorted[page_start:page_start + cards_per_page]
 
+        fig = plt.figure(figsize=(11, 8.5))
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+
+        ax.text(
+            0.5, 0.97,
+            f"Theme details ({page_start + 1}-{min(page_start + cards_per_page, len(themes_sorted))} of {len(themes_sorted)})",
+            ha="center", va="top", fontsize=14, fontweight="bold", transform=ax.transAxes
+        )
+
+        # Card geometry
+        left = 0.03
+        width = 0.94
+        top = 0.92
+        card_h = 0.205
+        gap = 0.02
+
+        for i, t in enumerate(page):
+            y_top = top - i * (card_h + gap)
+            rect = patches.FancyBboxPatch(
+                (left, y_top - card_h), width, card_h,
+                boxstyle="round,pad=0.012",
+                linewidth=1.0,
+                facecolor="#FFFFFF",
+                edgecolor="#BBBBBB",
+                transform=ax.transAxes
+            )
+            ax.add_patch(rect)
+
+            # Header line
+            ax.text(
+                left + 0.015, y_top - 0.02,
+                t.title,
+                ha="left", va="top", fontsize=12, fontweight="bold", transform=ax.transAxes
+            )
+            ax.text(
+                left + width - 0.015, y_top - 0.02,
+                f"{t.frequency} | {t.criticality}",
+                ha="right", va="top", fontsize=10, fontweight="bold", transform=ax.transAxes
+            )
+
+            # Body
+            body_y = y_top - 0.06
+            ax.text(
+                left + 0.015, body_y,
+                "Whats being said: " + _wrap(t.whats_being_said, 120),
+                ha="left", va="top", fontsize=9.5, transform=ax.transAxes
+            )
+
+            emos = ", ".join([e.strip() for e in (t.emotional_signals or []) if e.strip()][:8])
+            if emos:
+                ax.text(
+                    left + 0.015, y_top - 0.16,
+                    "Emotional signals: " + _wrap(emos, 120),
+                    ha="left", va="top", fontsize=9.5, transform=ax.transAxes
+                )
+
+        pdf.savefig(fig)
+        plt.close(fig)
 
 
 # -----------------------------
