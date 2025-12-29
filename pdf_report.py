@@ -1409,7 +1409,7 @@ def _add_all_teams_comments_insights_page_to_pdf(
     if insights is None or not insights.themes:
         return
 
-    title = f"All Teams - {cycle_label} - Comments Insights"
+    title = f"All Teams - {cycle_label} - Comments Insights (CARDS_V1)"
     _add_comments_insights_cards_to_pdf(
         pdf,
         title=title,
