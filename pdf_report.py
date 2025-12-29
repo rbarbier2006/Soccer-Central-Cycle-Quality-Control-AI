@@ -1599,52 +1599,44 @@ def _add_all_teams_comments_insights_page_to_pdf(
     cycle_label: str,
     model: str = "gpt-5-mini",
     chunk_size: int = 60,
-    max_themes: int = 10,
 ) -> None:
-    """
-    Creates clean, readable AI insight pages for All Teams.
-    Uses a concise JSON response and renders it as cards with wrapping + auto pagination.
-    """
+    client = _try_get_openai_client()
+    if client is None:
+        return  # AI disabled or missing key/package
 
-    comments_bullets = _collect_comments_text(profile, df)
-    if not comments_bullets.strip():
+    comment_cols = _infer_comment_col_indices(profile, df)
+    if not comment_cols:
         return
 
-    # If you have tons of comments, chunk them and then summarize the combined chunk summaries.
-    lines = [ln for ln in comments_bullets.splitlines() if ln.strip().startswith("- ")]
-    if chunk_size <= 0:
-        chunk_size = 60
-
-    chunk_jsons: List[dict] = []
-    for start in range(0, len(lines), chunk_size):
-        chunk = "\n".join(lines[start : start + chunk_size])
-        chunk_data = _openai_summarize_comments_to_json(
-            comments_bullets=chunk,
-            model=model,
-            max_themes=min(8, max_themes),
-            max_quotes_per_theme=2,
-        )
-        if chunk_data:
-            chunk_jsons.append(chunk_data)
-
-    if not chunk_jsons:
+    comments = _collect_comments(df, comment_cols)
+    if not comments:
         return
 
-    # Reduce step: merge chunk outputs into one final output
-    if len(chunk_jsons) == 1:
-        final = chunk_jsons[0]
-    else:
-        reduce_input = json.dumps(chunk_jsons, ensure_ascii=True)
-        reduce_bullets = f"- Chunk summaries JSON:\n{reduce_input}"
-        final = _openai_summarize_comments_to_json(
-            comments_bullets=reduce_bullets,
-            model=model,
-            max_themes=max_themes,
-            max_quotes_per_theme=3,
-        ) or chunk_jsons[0]
+    text = _llm_summarize_comments(client, comments, model=model, chunk_size=chunk_size)
+    if not text.strip():
+        return
 
-    page_title = f"All Teams - {cycle_label} - Comments Insights"
-    _render_ai_insights_cards_to_pdf(pdf, page_title=page_title, insights=final)
+    # Render as a clean text page
+    fig = plt.figure(figsize=(11, 8.5))
+    ax = fig.add_subplot(111)
+    ax.axis("off")
+
+    title = f"All Teams - {cycle_label} - Comments Insights"
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+
+    wrapped = textwrap.fill(text, width=110)
+    ax.text(
+        0.02, 0.98,
+        wrapped,
+        ha="left", va="top",
+        fontsize=9,
+        family="monospace",
+        transform=ax.transAxes,
+    )
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
 
 
 
