@@ -411,202 +411,241 @@ def _add_comments_insights_cards_to_pdf(
     if insights is None or not getattr(insights, "themes", None):
         return
 
-    # Helpers -------------------------------------------------
-    def wrap_lines(s: str, width: int) -> List[str]:
+    def _wrap_lines(s: str, width: int) -> List[str]:
         s = (s or "").strip()
-        return textwrap.wrap(s, width=width) if s else []
+        if not s:
+            return []
+        return textwrap.wrap(s, width=width)
 
-    def draw_wrapped_bullet(ax, x: float, y: float, text: str, width: int, fs: float, line_h: float) -> float:
-        """
-        Draw a bullet that can wrap across lines. Returns new y after drawing.
-        """
-        lines = wrap_lines(text, width=width)
-        if not lines:
-            return y
+    def _truncate_lines(lines: List[str], max_lines: int) -> List[str]:
+        if max_lines is None or max_lines <= 0:
+            return []
+        if len(lines) <= max_lines:
+            return lines
+        out = lines[:max_lines]
+        # add ellipsis to last line
+        if out:
+            last = out[-1]
+            if len(last) >= 3:
+                out[-1] = last[:-3] + "..."
+            else:
+                out[-1] = last + "..."
+        return out
 
-        # first line with bullet
-        ax.text(x, y, "- " + lines[0], ha="left", va="top", fontsize=fs, transform=ax.transAxes)
-        y -= line_h
+    def _dy(fig, fontsize: float, n_lines: int, line_spacing: float = 1.25) -> float:
+        # Convert points to Axes-fraction height (since we use ax.transAxes coords)
+        fig_h_in = float(fig.get_size_inches()[1])
+        return (fontsize * line_spacing / 72.0) * float(max(n_lines, 0)) / fig_h_in
 
-        # continuation lines indented
-        for ln in lines[1:]:
-            ax.text(x + 0.02, y, ln, ha="left", va="top", fontsize=fs, transform=ax.transAxes)
-            y -= line_h
-
-        return y
-
-    # ---------------------------------------------------------
     themes = list(insights.themes)
-    chunks = [themes[i:i + themes_per_page] for i in range(0, len(themes), themes_per_page)]
 
-    for page_i, page_themes in enumerate(chunks, start=1):
+    # First page has "Top priorities". Give it fewer cards so everything breathes.
+    has_priorities = bool((insights.top_priorities or []) and len((insights.top_priorities or [])) > 0)
+    per_page_other = int(themes_per_page) if themes_per_page and themes_per_page > 0 else 6
+    per_page_first = 4 if (has_priorities and len(themes) > 4) else min(per_page_other, len(themes))
+
+    pages: List[List[Theme]] = []
+    if has_priorities and len(themes) > per_page_first:
+        pages.append(themes[:per_page_first])
+        rest = themes[per_page_first:]
+        for i in range(0, len(rest), per_page_other):
+            pages.append(rest[i:i + per_page_other])
+    else:
+        for i in range(0, len(themes), per_page_other):
+            pages.append(themes[i:i + per_page_other])
+
+    for page_i, page_themes in enumerate(pages, start=1):
         fig = plt.figure(figsize=(11, 8.5))
         ax = fig.add_subplot(111)
         ax.axis("off")
 
-        header = title if len(chunks) == 1 else f"{title} (Page {page_i}/{len(chunks)})"
-        ax.text(0.02, 0.97, header, ha="left", va="top",
-                fontsize=16, fontweight="bold", transform=ax.transAxes)
+        header = title if len(pages) == 1 else f"{title} (Page {page_i}/{len(pages)})"
+        ax.text(
+            0.02, 0.97, header,
+            ha="left", va="top",
+            fontsize=16, fontweight="bold",
+            transform=ax.transAxes
+        )
 
-        # -----------------------------
-        # Top priorities (NO overlap)
-        # -----------------------------
-        cursor_y = 0.92
-        if page_i == 1 and (insights.top_priorities or []):
-            ax.text(0.02, cursor_y, "Top priorities", ha="left", va="top",
-                    fontsize=12, fontweight="bold", transform=ax.transAxes)
-            cursor_y -= 0.032
+        # Cursor starts below header
+        y_cursor = 0.92
 
-            # line spacing tuned for fontsize ~10
-            pri_fs = 10
-            pri_line_h = 0.024
+        # Top priorities (only on first page)
+        if page_i == 1 and has_priorities:
+            ax.text(
+                0.02, y_cursor, "Top priorities",
+                ha="left", va="top",
+                fontsize=12, fontweight="bold",
+                transform=ax.transAxes
+            )
+            y_cursor -= (_dy(fig, 12, 1) + 0.008)
 
-            # cap count AND cap total lines so it never eats the whole page
-            max_items = 6
-            max_total_lines = 12
-            total_lines_used = 0
+            # Full width wrap (later break), and dynamic y decrement per wrapped line count
+            wrap_w = 135  # bigger than your 95 so it goes further right
+            for p in (insights.top_priorities or [])[:6]:
+                raw_lines = _wrap_lines(str(p), width=wrap_w)
+                if not raw_lines:
+                    continue
 
-            for p in (insights.top_priorities or [])[:max_items]:
-                before = cursor_y
+                # Bullet with hanging indent
+                raw_lines[0] = "- " + raw_lines[0]
+                for k in range(1, len(raw_lines)):
+                    raw_lines[k] = "  " + raw_lines[k]
+                block = "\n".join(raw_lines)
 
-                # estimate how many lines this bullet will take
-                est_lines = max(1, len(wrap_lines(p, width=95)))
-                if total_lines_used + est_lines > max_total_lines:
-                    break
-
-                cursor_y = draw_wrapped_bullet(
-                    ax=ax,
-                    x=0.03,
-                    y=cursor_y,
-                    text=str(p),
-                    width=95,
-                    fs=pri_fs,
-                    line_h=pri_line_h,
+                ax.text(
+                    0.02, y_cursor, block,
+                    ha="left", va="top",
+                    fontsize=10,
+                    transform=ax.transAxes
                 )
 
-                used = int(round((before - cursor_y) / pri_line_h))
-                total_lines_used += max(1, used)
+                y_cursor -= (_dy(fig, 10, len(raw_lines)) + 0.010)
 
-            # add a little breathing room before cards
-            cursor_y -= 0.015
+            y_cursor -= 0.010  # extra breathing room before cards
 
-        # -----------------------------
-        # Cards layout (NO overlap)
-        # -----------------------------
-        # If priorities took space, start cards lower automatically.
-        cards_top_y = 0.90 if (page_i != 1 or not (insights.top_priorities or [])) else cursor_y
+        # ---- Cards layout (auto-sized) ----
+        n_cards = len(page_themes)
+        if n_cards == 0:
+            # Notes only on last page if no cards (rare)
+            if page_i == len(pages) and getattr(insights, "notes", "").strip():
+                ax.text(0.02, 0.06, "Notes", ha="left", va="top",
+                        fontsize=11, fontweight="bold", transform=ax.transAxes)
+                note_lines = _wrap_lines(insights.notes, width=120)
+                ax.text(0.02, 0.035, "\n".join(note_lines),
+                        ha="left", va="top", fontsize=9, transform=ax.transAxes)
+            pdf.savefig(fig)
+            plt.close(fig)
+            continue
 
-        left_x, right_x = 0.02, 0.51
-        card_w = 0.47
-        gap_y = 0.018
+        # Reserve bottom space for notes only on the last page
+        show_notes = (page_i == len(pages) and bool(getattr(insights, "notes", "").strip()))
+        bottom_margin = 0.12 if show_notes else 0.06
 
-        # Make card height dynamic so 3 rows always fit in the remaining space.
-        bottom_margin = 0.08
-        available_h = max(0.40, cards_top_y - bottom_margin)
-        card_h = (available_h - 2 * gap_y) / 3.0
-        card_h = max(0.11, min(0.155, card_h))  # clamp to readable range
+        rows = int(math.ceil(n_cards / 2.0))
+        gap_y = 0.020
+        col_gap_x = 0.020
+        margin_x = 0.02
 
-        # Start at the top of the first row
-        y_row_top = cards_top_y
-        col = 0
-        base_idx = (page_i - 1) * themes_per_page
+        left_x = margin_x
+        card_w = (1.0 - 2 * margin_x - col_gap_x) / 2.0
+        right_x = left_x + card_w + col_gap_x
 
-        # Text tuning inside cards
-        title_fs = 11
-        meta_fs = 9
-        body_fs = 9
-        body_line_h = 0.022  # axes coords (works well at fs=9)
-        wrap_w_title = 52
-        wrap_w_body = 72
+        available_h = max(0.10, y_cursor - bottom_margin)
+        card_h = (available_h - (rows - 1) * gap_y) / rows
+        # Safety clamp so boxes never get tiny
+        card_h = max(card_h, 0.18)
 
-        for j, t in enumerate(page_themes, start=1):
-            idx = base_idx + j
-            x = left_x if col == 0 else right_x
+        base_idx = sum(len(p) for p in pages[:page_i - 1])
 
-            style = _crit_style(getattr(t, "criticality", "LOW"))
-            rect = patches.FancyBboxPatch(
-                (x, y_row_top - card_h),
-                card_w, card_h,
-                boxstyle="round,pad=0.008,rounding_size=0.01",
-                linewidth=1.2,
-                edgecolor=style["edge"],
-                facecolor=style["face"],
-                transform=ax.transAxes,
-            )
-            ax.add_patch(rect)
+        # Draw row by row
+        idx_in_page = 0
+        for r in range(rows):
+            row_top = y_cursor - r * (card_h + gap_y)
 
-            # Card content as a flowing cursor (prevents overlap)
-            pad_x = 0.012
-            pad_y = 0.014
-            text_x = x + pad_x
-            top_y = y_row_top - pad_y
-            bottom_y = (y_row_top - card_h) + pad_y
-
-            # Title
-            title_line = f"{idx}) {getattr(t, 'title', '').strip()}"
-            title_lines = wrap_lines(title_line, wrap_w_title)[:2]  # hard cap 2 lines
-            cur = top_y
-            for ln in title_lines:
-                txt = ax.text(text_x, cur, ln, ha="left", va="top",
-                              fontsize=title_fs, fontweight="bold", transform=ax.transAxes)
-                txt.set_clip_path(rect)
-                cur -= 0.030
-
-            # Meta
-            meta_line = f"Frequency: {getattr(t, 'frequency', '')}   |   Criticality: {getattr(t, 'criticality', '')}"
-            txt = ax.text(text_x, cur, meta_line, ha="left", va="top",
-                          fontsize=meta_fs, transform=ax.transAxes)
-            txt.set_clip_path(rect)
-            cur -= 0.028
-
-            # Body (flow, then truncate if needed)
-            whats = (getattr(t, "whats_being_said", "") or "").strip()
-            body_lines = wrap_lines(whats, wrap_w_body)
-
-            emos = getattr(t, "emotional_signals", []) or []
-            emo_line = ""
-            if emos:
-                emo_line = "Signals: " + ", ".join([str(e).strip() for e in emos[:6] if str(e).strip()])
-            emo_lines = wrap_lines(emo_line, wrap_w_body) if emo_line else []
-
-            # Reserve space for signals if they exist (at least 1 line)
-            reserve = (len(emo_lines) * body_line_h + 0.010) if emo_lines else 0.0
-
-            for ln in body_lines:
-                if cur - body_line_h < (bottom_y + reserve):
-                    # not enough room, stop body
+            for c in range(2):
+                if idx_in_page >= n_cards:
                     break
-                txt = ax.text(text_x, cur, ln, ha="left", va="top",
-                              fontsize=body_fs, transform=ax.transAxes)
-                txt.set_clip_path(rect)
-                cur -= body_line_h
 
-            # Signals (only if room)
-            if emo_lines:
-                cur -= 0.008
-                for ln in emo_lines:
-                    if cur - body_line_h < bottom_y:
-                        break
-                    txt = ax.text(text_x, cur, ln, ha="left", va="top",
-                                  fontsize=8.5, transform=ax.transAxes)
-                    txt.set_clip_path(rect)
-                    cur -= body_line_h
+                t = page_themes[idx_in_page]
+                idx_in_page += 1
+                idx = base_idx + idx_in_page
 
-            # next slot
-            if col == 1:
-                y_row_top -= (card_h + gap_y)
-                col = 0
-            else:
-                col = 1
+                x = left_x if c == 0 else right_x
+                style = _crit_style(getattr(t, "criticality", "LOW"))
 
-        # Notes only on last page (optional)
-        if page_i == len(chunks) and getattr(insights, "notes", "").strip():
-            ax.text(0.02, 0.06, "Notes", ha="left", va="top",
+                rect = patches.FancyBboxPatch(
+                    (x, row_top - card_h),
+                    card_w, card_h,
+                    boxstyle="round,pad=0.008,rounding_size=0.01",
+                    linewidth=1.2,
+                    edgecolor=style["edge"],
+                    facecolor=style["face"],
+                    transform=ax.transAxes,
+                )
+                ax.add_patch(rect)
+
+                # Inner text cursor inside card
+                pad_x = 0.012
+                pad_top = 0.016
+                pad_bottom = 0.014
+                inner_top = row_top - pad_top
+                inner_bottom = (row_top - card_h) + pad_bottom
+                cur_y = inner_top
+
+                # Title (max 2 lines)
+                title_line = f"{idx}) {getattr(t, 'title', '').strip()}"
+                title_lines = _truncate_lines(_wrap_lines(title_line, width=54), max_lines=2)
+                if title_lines:
+                    ax.text(
+                        x + pad_x, cur_y,
+                        "\n".join(title_lines),
+                        ha="left", va="top",
+                        fontsize=11, fontweight="bold",
+                        transform=ax.transAxes
+                    )
+                    cur_y -= (_dy(fig, 11, len(title_lines)) + 0.006)
+
+                # Meta (1 line)
+                meta_line = f"Frequency: {getattr(t, 'frequency', '')}   |   Criticality: {getattr(t, 'criticality', '')}"
+                ax.text(
+                    x + pad_x, cur_y,
+                    meta_line,
+                    ha="left", va="top",
+                    fontsize=9,
+                    transform=ax.transAxes
+                )
+                cur_y -= (_dy(fig, 9, 1) + 0.007)
+
+                # Whats being said (fit to remaining space)
+                wbs_text = str(getattr(t, "whats_being_said", "") or "").strip()
+                wbs_lines = _wrap_lines(wbs_text, width=78)
+                if wbs_lines and cur_y > inner_bottom:
+                    per_line = _dy(fig, 9, 1)
+                    max_lines = int(max(0.0, (cur_y - inner_bottom) / (per_line + 0.001)))
+                    # keep at least 2 lines if possible
+                    max_lines = max(2, max_lines)
+                    wbs_lines = _truncate_lines(wbs_lines, max_lines=max_lines)
+                    ax.text(
+                        x + pad_x, cur_y,
+                        "\n".join(wbs_lines),
+                        ha="left", va="top",
+                        fontsize=9,
+                        transform=ax.transAxes
+                    )
+                    cur_y -= (_dy(fig, 9, len(wbs_lines)) + 0.006)
+
+                # Emotional signals (only if there is still room)
+                emos = getattr(t, "emotional_signals", []) or []
+                emo_items = [str(e).strip() for e in emos[:6] if str(e).strip()]
+                if emo_items and cur_y > inner_bottom + _dy(fig, 8.5, 1):
+                    emo_line = "Signals: " + ", ".join(emo_items)
+                    emo_lines = _wrap_lines(emo_line, width=78)
+
+                    per_line = _dy(fig, 8.5, 1)
+                    max_lines = int(max(0.0, (cur_y - inner_bottom) / (per_line + 0.001)))
+                    max_lines = max(1, max_lines)
+                    emo_lines = _truncate_lines(emo_lines, max_lines=max_lines)
+
+                    ax.text(
+                        x + pad_x, cur_y,
+                        "\n".join(emo_lines),
+                        ha="left", va="top",
+                        fontsize=8.5,
+                        transform=ax.transAxes
+                    )
+
+        # Notes only on last page
+        if show_notes:
+            ax.text(0.02, 0.10, "Notes", ha="left", va="top",
                     fontsize=11, fontweight="bold", transform=ax.transAxes)
-            ax.text(0.02, 0.035, textwrap.fill(insights.notes.strip(), width=120),
+            note_lines = _wrap_lines(insights.notes, width=120)
+            note_lines = _truncate_lines(note_lines, max_lines=3)
+            ax.text(0.02, 0.075, "\n".join(note_lines),
                     ha="left", va="top", fontsize=9, transform=ax.transAxes)
 
-        fig.tight_layout()
+        # Avoid tight_layout fights with Axes-fraction positioning
+        fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
         pdf.savefig(fig)
         plt.close(fig)
 
