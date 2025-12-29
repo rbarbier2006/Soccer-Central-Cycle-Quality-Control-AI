@@ -534,9 +534,20 @@ def _add_comments_insights_cards_to_pdf(
         x_left = margin_x
         x_right = x_left + card_w + col_gap_x
 
+        #------
+        #available_h = max(0.10, y - bottom_margin)
+        #card_h = (available_h - (rows - 1) * gap_y) / rows
+        #card_h = max(card_h, 0.22 if verbose_mode else 0.18)
         available_h = max(0.10, y - bottom_margin)
         card_h = (available_h - (rows - 1) * gap_y) / rows
-        card_h = max(card_h, 0.22 if verbose_mode else 0.18)
+        
+        # Minimum height so text has room, but do not let cards grow huge
+        min_card_h = 0.20 if verbose_mode else 0.17
+        max_card_h = 0.24 if verbose_mode else 0.21
+        
+        card_h = max(card_h, min_card_h)
+        card_h = min(card_h, max_card_h)
+        #-----
 
         base_idx = sum(len(p) for p in pages[:page_i - 1])
 
