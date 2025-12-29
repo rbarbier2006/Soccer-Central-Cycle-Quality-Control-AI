@@ -403,7 +403,7 @@ def _wrap(s: str, width: int) -> str:
 
 
 def _add_comments_insights_cards_to_pdf(
-    pdf,                 # PdfPages
+    pdf,
     title: str,
     insights: CommentsInsights,
     themes_per_page: int = 6,
@@ -418,12 +418,11 @@ def _add_comments_insights_cards_to_pdf(
         return textwrap.wrap(s, width=width)
 
     def _truncate_lines(lines: List[str], max_lines: int) -> List[str]:
-        if max_lines is None or max_lines <= 0:
+        if max_lines <= 0:
             return []
         if len(lines) <= max_lines:
             return lines
         out = lines[:max_lines]
-        # add ellipsis to last line
         if out:
             last = out[-1]
             if len(last) >= 3:
@@ -432,18 +431,34 @@ def _add_comments_insights_cards_to_pdf(
                 out[-1] = last + "..."
         return out
 
-    def _dy(fig, fontsize: float, n_lines: int, line_spacing: float = 1.25) -> float:
-        # Convert points to Axes-fraction height (since we use ax.transAxes coords)
+    # Conservative line height (the old 1.25 often underestimates and causes collisions)
+    def _line_h_axes(fig, fontsize: float, line_spacing: float = 1.55) -> float:
         fig_h_in = float(fig.get_size_inches()[1])
-        return (fontsize * line_spacing / 72.0) * float(max(n_lines, 0)) / fig_h_in
+        return (fontsize * line_spacing / 72.0) / fig_h_in
 
-    themes = list(insights.themes)
+    themes = list(insights.themes or [])
+    priorities = list((insights.top_priorities or [])[:6])
+    has_priorities = len(priorities) > 0
 
-    # First page has "Top priorities". Give it fewer cards so everything breathes.
-    has_priorities = bool((insights.top_priorities or []) and len((insights.top_priorities or [])) > 0)
-    per_page_other = int(themes_per_page) if themes_per_page and themes_per_page > 0 else 6
-    per_page_first = 4 if (has_priorities and len(themes) > 4) else min(per_page_other, len(themes))
+    # Detect "verbose mode" (families tends to trigger this)
+    if themes:
+        avg_chars = sum(
+            len(str(getattr(t, "whats_being_said", "") or "")) +
+            len(" ".join(getattr(t, "emotional_signals", []) or []))
+            for t in themes
+        ) / max(1, len(themes))
+    else:
+        avg_chars = 0
 
+    verbose_mode = (avg_chars >= 260) or (has_priorities and len(priorities) >= 5)
+
+    # Layout strategy
+    # - If verbose: fewer cards per page (taller boxes)
+    # - First page with priorities gets even fewer cards
+    per_page_other = 4 if verbose_mode else max(4, int(themes_per_page))
+    per_page_first = 2 if (verbose_mode and has_priorities) else min(per_page_other, 4)
+
+    # Split themes into pages
     pages: List[List[Theme]] = []
     if has_priorities and len(themes) > per_page_first:
         pages.append(themes[:per_page_first])
@@ -454,94 +469,91 @@ def _add_comments_insights_cards_to_pdf(
         for i in range(0, len(themes), per_page_other):
             pages.append(themes[i:i + per_page_other])
 
+    total_pages = len(pages) if pages else 1
+
     for page_i, page_themes in enumerate(pages, start=1):
         fig = plt.figure(figsize=(11, 8.5))
         ax = fig.add_subplot(111)
         ax.axis("off")
 
-        header = title if len(pages) == 1 else f"{title} (Page {page_i}/{len(pages)})"
-        ax.text(
-            0.02, 0.97, header,
-            ha="left", va="top",
-            fontsize=16, fontweight="bold",
-            transform=ax.transAxes
-        )
+        header = title if total_pages == 1 else f"{title} (Page {page_i}/{total_pages})"
+        ax.text(0.02, 0.97, header, ha="left", va="top", fontsize=16, fontweight="bold", transform=ax.transAxes)
 
-        # Cursor starts below header
-        y_cursor = 0.92
+        y = 0.92
 
-        # Top priorities (only on first page)
+        # Top priorities (first page only)
         if page_i == 1 and has_priorities:
-            ax.text(
-                0.02, y_cursor, "Top priorities",
-                ha="left", va="top",
-                fontsize=12, fontweight="bold",
-                transform=ax.transAxes
-            )
-            y_cursor -= (_dy(fig, 12, 1) + 0.008)
+            ax.text(0.02, y, "Top priorities", ha="left", va="top",
+                    fontsize=12, fontweight="bold", transform=ax.transAxes)
+            y -= _line_h_axes(fig, 12) + 0.010
 
-            # Full width wrap (later break), and dynamic y decrement per wrapped line count
-            wrap_w = 135  # bigger than your 95 so it goes further right
-            for p in (insights.top_priorities or [])[:6]:
-                raw_lines = _wrap_lines(str(p), width=wrap_w)
-                if not raw_lines:
+            # Full width priorities block
+            wrap_w = 140 if verbose_mode else 125
+            lh = _line_h_axes(fig, 10)
+
+            for p in priorities:
+                lines = _wrap_lines(str(p), width=wrap_w)
+                if not lines:
                     continue
 
-                # Bullet with hanging indent
-                raw_lines[0] = "- " + raw_lines[0]
-                for k in range(1, len(raw_lines)):
-                    raw_lines[k] = "  " + raw_lines[k]
-                block = "\n".join(raw_lines)
+                # Draw bullet + hanging indent line-by-line (prevents stray '-' artifacts)
+                for li, line in enumerate(lines):
+                    prefix = "- " if li == 0 else "  "
+                    ax.text(0.02, y, prefix + line, ha="left", va="top", fontsize=10, transform=ax.transAxes)
+                    y -= lh + 0.002
 
-                ax.text(
-                    0.02, y_cursor, block,
-                    ha="left", va="top",
-                    fontsize=10,
-                    transform=ax.transAxes
-                )
+                y -= 0.006  # space between bullets
 
-                y_cursor -= (_dy(fig, 10, len(raw_lines)) + 0.010)
+            y -= 0.012  # space before cards
 
-            y_cursor -= 0.010  # extra breathing room before cards
+        # Notes area reserved on last page only
+        show_notes = (page_i == total_pages and bool((getattr(insights, "notes", "") or "").strip()))
+        bottom_margin = 0.12 if show_notes else 0.06
 
-        # ---- Cards layout (auto-sized) ----
-        n_cards = len(page_themes)
-        if n_cards == 0:
-            # Notes only on last page if no cards (rare)
-            if page_i == len(pages) and getattr(insights, "notes", "").strip():
-                ax.text(0.02, 0.06, "Notes", ha="left", va="top",
+        if not page_themes:
+            if show_notes:
+                ax.text(0.02, 0.10, "Notes", ha="left", va="top",
                         fontsize=11, fontweight="bold", transform=ax.transAxes)
-                note_lines = _wrap_lines(insights.notes, width=120)
-                ax.text(0.02, 0.035, "\n".join(note_lines),
-                        ha="left", va="top", fontsize=9, transform=ax.transAxes)
+                note_lines = _truncate_lines(_wrap_lines(insights.notes, width=120), max_lines=3)
+                ax.text(0.02, 0.075, "\n".join(note_lines), ha="left", va="top", fontsize=9, transform=ax.transAxes)
+
+            fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
             pdf.savefig(fig)
             plt.close(fig)
             continue
 
-        # Reserve bottom space for notes only on the last page
-        show_notes = (page_i == len(pages) and bool(getattr(insights, "notes", "").strip()))
-        bottom_margin = 0.12 if show_notes else 0.06
-
+        # Cards grid
+        n_cards = len(page_themes)
         rows = int(math.ceil(n_cards / 2.0))
-        gap_y = 0.020
-        col_gap_x = 0.020
+
         margin_x = 0.02
+        col_gap_x = 0.02
+        gap_y = 0.024 if verbose_mode else 0.020
 
-        left_x = margin_x
         card_w = (1.0 - 2 * margin_x - col_gap_x) / 2.0
-        right_x = left_x + card_w + col_gap_x
+        x_left = margin_x
+        x_right = x_left + card_w + col_gap_x
 
-        available_h = max(0.10, y_cursor - bottom_margin)
+        available_h = max(0.10, y - bottom_margin)
         card_h = (available_h - (rows - 1) * gap_y) / rows
-        # Safety clamp so boxes never get tiny
-        card_h = max(card_h, 0.18)
+        card_h = max(card_h, 0.22 if verbose_mode else 0.18)
 
         base_idx = sum(len(p) for p in pages[:page_i - 1])
 
-        # Draw row by row
+        # Font sizes tuned for verbose blocks
+        fs_title = 11
+        fs_meta = 9
+        fs_body = 8.7 if verbose_mode else 9
+        fs_sig = 8.2 if verbose_mode else 8.5
+
+        lh_title = _line_h_axes(fig, fs_title)
+        lh_meta = _line_h_axes(fig, fs_meta)
+        lh_body = _line_h_axes(fig, fs_body)
+        lh_sig = _line_h_axes(fig, fs_sig)
+
         idx_in_page = 0
         for r in range(rows):
-            row_top = y_cursor - r * (card_h + gap_y)
+            row_top = y - r * (card_h + gap_y)
 
             for c in range(2):
                 if idx_in_page >= n_cards:
@@ -551,7 +563,7 @@ def _add_comments_insights_cards_to_pdf(
                 idx_in_page += 1
                 idx = base_idx + idx_in_page
 
-                x = left_x if c == 0 else right_x
+                x = x_left if c == 0 else x_right
                 style = _crit_style(getattr(t, "criticality", "LOW"))
 
                 rect = patches.FancyBboxPatch(
@@ -565,89 +577,67 @@ def _add_comments_insights_cards_to_pdf(
                 )
                 ax.add_patch(rect)
 
-                # Inner text cursor inside card
                 pad_x = 0.012
                 pad_top = 0.016
-                pad_bottom = 0.014
+                pad_bot = 0.014
+
                 inner_top = row_top - pad_top
-                inner_bottom = (row_top - card_h) + pad_bottom
+                inner_bot = (row_top - card_h) + pad_bot
                 cur_y = inner_top
 
                 # Title (max 2 lines)
-                title_line = f"{idx}) {getattr(t, 'title', '').strip()}"
+                title_line = f"{idx}) {str(getattr(t, 'title', '') or '').strip()}"
                 title_lines = _truncate_lines(_wrap_lines(title_line, width=54), max_lines=2)
                 if title_lines:
-                    ax.text(
-                        x + pad_x, cur_y,
-                        "\n".join(title_lines),
-                        ha="left", va="top",
-                        fontsize=11, fontweight="bold",
-                        transform=ax.transAxes
-                    )
-                    cur_y -= (_dy(fig, 11, len(title_lines)) + 0.006)
+                    ax.text(x + pad_x, cur_y, "\n".join(title_lines),
+                            ha="left", va="top", fontsize=fs_title, fontweight="bold", transform=ax.transAxes)
+                    cur_y -= len(title_lines) * (lh_title + 0.001) + 0.006
 
                 # Meta (1 line)
-                meta_line = f"Frequency: {getattr(t, 'frequency', '')}   |   Criticality: {getattr(t, 'criticality', '')}"
-                ax.text(
-                    x + pad_x, cur_y,
-                    meta_line,
-                    ha="left", va="top",
-                    fontsize=9,
-                    transform=ax.transAxes
-                )
-                cur_y -= (_dy(fig, 9, 1) + 0.007)
+                meta = f"Frequency: {getattr(t, 'frequency', '')}   |   Criticality: {getattr(t, 'criticality', '')}"
+                ax.text(x + pad_x, cur_y, meta, ha="left", va="top", fontsize=fs_meta, transform=ax.transAxes)
+                cur_y -= lh_meta + 0.010
 
-                # Whats being said (fit to remaining space)
-                wbs_text = str(getattr(t, "whats_being_said", "") or "").strip()
-                wbs_lines = _wrap_lines(wbs_text, width=78)
-                if wbs_lines and cur_y > inner_bottom:
-                    per_line = _dy(fig, 9, 1)
-                    max_lines = int(max(0.0, (cur_y - inner_bottom) / (per_line + 0.001)))
-                    # keep at least 2 lines if possible
+                # Reserve at least 1 line for Signals if present
+                emos = [str(e).strip() for e in (getattr(t, "emotional_signals", []) or []) if str(e).strip()]
+                emos = emos[:4] if verbose_mode else emos[:6]
+                reserve_for_signals = (lh_sig * 1.2 + 0.006) if emos else 0.0
+
+                # Body: truncate to fit
+                wbs = str(getattr(t, "whats_being_said", "") or "").strip()
+                wbs_lines = _wrap_lines(wbs, width=78)
+                if wbs_lines and cur_y > inner_bot:
+                    room = max(0.0, (cur_y - inner_bot) - reserve_for_signals)
+                    max_lines = int(room / (lh_body + 0.001))
                     max_lines = max(2, max_lines)
                     wbs_lines = _truncate_lines(wbs_lines, max_lines=max_lines)
-                    ax.text(
-                        x + pad_x, cur_y,
-                        "\n".join(wbs_lines),
-                        ha="left", va="top",
-                        fontsize=9,
-                        transform=ax.transAxes
-                    )
-                    cur_y -= (_dy(fig, 9, len(wbs_lines)) + 0.006)
 
-                # Emotional signals (only if there is still room)
-                emos = getattr(t, "emotional_signals", []) or []
-                emo_items = [str(e).strip() for e in emos[:6] if str(e).strip()]
-                if emo_items and cur_y > inner_bottom + _dy(fig, 8.5, 1):
-                    emo_line = "Signals: " + ", ".join(emo_items)
-                    emo_lines = _wrap_lines(emo_line, width=78)
+                    ax.text(x + pad_x, cur_y, "\n".join(wbs_lines),
+                            ha="left", va="top", fontsize=fs_body, transform=ax.transAxes)
+                    cur_y -= len(wbs_lines) * (lh_body + 0.001) + 0.008
 
-                    per_line = _dy(fig, 8.5, 1)
-                    max_lines = int(max(0.0, (cur_y - inner_bottom) / (per_line + 0.001)))
-                    max_lines = max(1, max_lines)
-                    emo_lines = _truncate_lines(emo_lines, max_lines=max_lines)
+                # Signals: only if there is room
+                if emos and cur_y > inner_bot + lh_sig:
+                    sig_line = "Signals: " + ", ".join(emos)
+                    sig_lines = _wrap_lines(sig_line, width=78)
+                    # Keep signals short visually
+                    sig_lines = _truncate_lines(sig_lines, max_lines=2 if verbose_mode else 3)
 
-                    ax.text(
-                        x + pad_x, cur_y,
-                        "\n".join(emo_lines),
-                        ha="left", va="top",
-                        fontsize=8.5,
-                        transform=ax.transAxes
-                    )
+                    ax.text(x + pad_x, cur_y, "\n".join(sig_lines),
+                            ha="left", va="top", fontsize=fs_sig, transform=ax.transAxes)
 
-        # Notes only on last page
+        # Notes on last page
         if show_notes:
             ax.text(0.02, 0.10, "Notes", ha="left", va="top",
                     fontsize=11, fontweight="bold", transform=ax.transAxes)
-            note_lines = _wrap_lines(insights.notes, width=120)
-            note_lines = _truncate_lines(note_lines, max_lines=3)
+            note_lines = _truncate_lines(_wrap_lines(insights.notes, width=120), max_lines=3)
             ax.text(0.02, 0.075, "\n".join(note_lines),
                     ha="left", va="top", fontsize=9, transform=ax.transAxes)
 
-        # Avoid tight_layout fights with Axes-fraction positioning
         fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
         pdf.savefig(fig)
         plt.close(fig)
+
 
 
 
