@@ -134,19 +134,33 @@ def _normalize_group_column_inplace(df: pd.DataFrame, profile: SurveyProfile) ->
     df.loc[df[group_col_name] == "", group_col_name] = profile.unassigned_label
     return group_col_name
 
-#---------------------------
-#AI Helpers
-#--------------------------
+# ---------------------------
+# AI Helpers (KEEP THIS BLOCK)
+# ---------------------------
+import os
+import re
+import json
+import textwrap
+from typing import Optional, List, Literal
+
+import matplotlib.patches as patches
+from pydantic import BaseModel, Field
+
+# If you already have OpenAI imported elsewhere, you can remove this import here.
+from openai import OpenAI
+
+
 class Theme(BaseModel):
     title: str = Field(..., max_length=70)
     frequency: Literal["Very high", "High", "Medium", "Low"]
     criticality: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
     whats_being_said: str = Field(..., max_length=320)
-    emotional_signals: list[str] = Field(default_factory=list, max_length=8)
+    emotional_signals: List[str] = Field(default_factory=list)  # limit in code/prompt
+
 
 class CommentsInsights(BaseModel):
-    top_priorities: list[str] = Field(default_factory=list, max_length=6)
-    themes: list[Theme] = Field(default_factory=list, max_length=12)
+    top_priorities: List[str] = Field(default_factory=list)  # limit in code/prompt
+    themes: List[Theme] = Field(default_factory=list)         # limit in code/prompt
     notes: str = Field(default="", max_length=280)
 
 
@@ -160,18 +174,16 @@ def _is_meaningful_comment(s: str) -> bool:
     junk = {"no", "none", "n/a", "na", "nope", "nothing", "nil"}
     if low in junk:
         return False
-    # too short usually not useful
     if len(t) < 8:
         return False
     return True
 
 
-def _infer_comment_col_indices(profile: SurveyProfile, df: pd.DataFrame) -> List[int]:
+def _infer_comment_col_indices(profile, df) -> List[int]:
     """
     Prefer profile.comment_col_indices if it exists.
     Otherwise infer by header keywords + content shape.
     """
-    # If you add comment_col_indices into profiles.py later, this will auto-use it:
     idxs = getattr(profile, "comment_col_indices", None)
     if idxs:
         return [i for i in idxs if 0 <= int(i) < len(df.columns)]
@@ -183,12 +195,11 @@ def _infer_comment_col_indices(profile: SurveyProfile, df: pd.DataFrame) -> List
         if any(k in name for k in keywords):
             candidate.append(i)
 
-    # Fallback heuristic: object columns with average string length reasonably large
+    # fallback heuristic: object-like columns with average string length reasonably large
     if not candidate:
         for i, col in enumerate(df.columns):
             if i in (profile.group_col_index, profile.respondent_name_index):
                 continue
-            # skip known structured columns
             if i in (profile.rating_col_indices or []):
                 continue
             if i in (profile.yesno_col_indices or []):
@@ -200,13 +211,13 @@ def _infer_comment_col_indices(profile: SurveyProfile, df: pd.DataFrame) -> List
             if series.empty:
                 continue
             avg_len = float(series.map(len).mean())
-            if avg_len >= 25:  # looks like real free-text
+            if avg_len >= 25:
                 candidate.append(i)
 
     return sorted(set(candidate))
 
 
-def _collect_comments(df: pd.DataFrame, col_indices: List[int]) -> List[str]:
+def _collect_comments(df, col_indices: List[int]) -> List[str]:
     out = []
     for idx in col_indices:
         if idx < 0 or idx >= len(df.columns):
@@ -216,7 +227,7 @@ def _collect_comments(df: pd.DataFrame, col_indices: List[int]) -> List[str]:
             if _is_meaningful_comment(val):
                 out.append(val)
 
-    # de-dup while preserving order
+    # de-dup preserving order
     seen = set()
     dedup = []
     for s in out:
@@ -227,14 +238,10 @@ def _collect_comments(df: pd.DataFrame, col_indices: List[int]) -> List[str]:
 
 
 def _try_get_openai_client():
-    """
-    Lazy import so the report still works with AI disabled or missing package.
-    """
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
     try:
-        from openai import OpenAI
         return OpenAI()
     except Exception:
         return None
@@ -246,7 +253,6 @@ def _safe_json_loads(s: str) -> Optional[dict]:
     try:
         return json.loads(s)
     except Exception:
-        # Sometimes the model wraps JSON in text; try to extract first {...}
         m = re.search(r"\{.*\}", s, flags=re.DOTALL)
         if not m:
             return None
@@ -259,12 +265,16 @@ def _safe_json_loads(s: str) -> Optional[dict]:
 def _llm_summarize_comments_structured(
     client,
     comments: List[str],
-    model: str,
-    chunk_size: int,
+    model: str = "gpt-5-mini",
+    chunk_size: int = 60,
 ) -> Optional[CommentsInsights]:
+    """
+    Returns CommentsInsights (structured). This is what enables the pretty PDF cards.
+    """
     if not comments:
         return None
 
+    # keep prompts consistent so output stays clean
     scale = (
         "Criticality scale:\n"
         "CRITICAL = threatens to leave / not recommend / strong anger or betrayal\n"
@@ -274,16 +284,21 @@ def _llm_summarize_comments_structured(
     )
 
     system_msg = (
-        "You analyze survey comments for a sports academy and produce a structured summary.\n"
-        "Return 8-12 themes ranked by frequency.\n"
-        "Each theme must be concise and actionable.\n"
-        "Do not repeat the same theme with different wording.\n"
+        "You analyze survey comments for a sports academy.\n"
+        "Return a structured summary with 8-12 themes ranked by frequency.\n"
+        "Rules:\n"
+        "- Themes must be non-overlapping (dedupe aggressively).\n"
+        "- Titles must be short and specific.\n"
+        "- whats_being_said: 1-2 sentences max.\n"
+        "- emotional_signals: 0-6 short phrases/quotes max (no paragraphs).\n"
+        "- top_priorities: 0-6 concise action items.\n"
+        "- Never add meta lines like 'If you want I can...'\n"
     )
 
     def one_pass(input_comments: List[str]) -> Optional[CommentsInsights]:
         user_msg = "SURVEY COMMENTS:\n" + "\n".join([f"- {c}" for c in input_comments])
 
-        # Preferred: Structured Outputs parse (SDK supports Pydantic schemas). :contentReference[oaicite:2]{index=2}
+        # Best case: structured parse
         try:
             resp = client.responses.parse(
                 model=model,
@@ -293,28 +308,41 @@ def _llm_summarize_comments_structured(
                 ],
                 text_format=CommentsInsights,
             )
-            return resp.output_parsed
+            out = resp.output_parsed
+
+            # hard limits (so rendering never explodes)
+            out.top_priorities = (out.top_priorities or [])[:6]
+            out.themes = (out.themes or [])[:12]
+            for t in out.themes:
+                t.emotional_signals = (t.emotional_signals or [])[:6]
+            return out
+
         except Exception:
-            # Fallback: plain text -> attempt JSON extraction (less reliable)
+            # fallback: ask for JSON and validate
             resp = client.responses.create(
                 model=model,
                 instructions=system_msg,
-                input=scale + "\n" + user_msg + "\n\nReturn JSON that matches the schema.",
+                input=scale + "\n" + user_msg + "\n\nReturn ONLY valid JSON matching the schema.",
             )
             raw = getattr(resp, "output_text", "") or ""
             data = _safe_json_loads(raw)
             if not data:
                 return None
             try:
-                return CommentsInsights.model_validate(data)
+                out = CommentsInsights.model_validate(data)
+                out.top_priorities = (out.top_priorities or [])[:6]
+                out.themes = (out.themes or [])[:12]
+                for t in out.themes:
+                    t.emotional_signals = (t.emotional_signals or [])[:6]
+                return out
             except Exception:
                 return None
 
-    # One shot
+    # one-shot
     if len(comments) <= chunk_size:
         return one_pass(comments)
 
-    # Chunk
+    # chunk + local merge (simple + predictable)
     partials: List[CommentsInsights] = []
     for start in range(0, len(comments), chunk_size):
         chunk = comments[start:start + chunk_size]
@@ -325,33 +353,149 @@ def _llm_summarize_comments_structured(
     if not partials:
         return None
 
-    # Merge partials locally (dedupe by title-ish)
-    # You can also do an LLM merge, but local merge is cheaper + predictable.
     merged = CommentsInsights(top_priorities=[], themes=[], notes="")
     seen_titles = set()
 
-    # collect priorities
+    # priorities
     for p in partials:
-        for item in p.top_priorities:
+        for item in (p.top_priorities or []):
+            item = str(item).strip()
             if item and item not in merged.top_priorities and len(merged.top_priorities) < 6:
                 merged.top_priorities.append(item)
 
-    # merge themes (keep earlier ones first; they are "ranked")
+    # themes (keep order; they are “ranked” within each chunk)
     for p in partials:
-        for t in p.themes:
+        for t in (p.themes or []):
             key = t.title.strip().lower()
-            if key in seen_titles:
+            if not key or key in seen_titles:
                 continue
             seen_titles.add(key)
+            t.emotional_signals = (t.emotional_signals or [])[:6]
             merged.themes.append(t)
             if len(merged.themes) >= 12:
                 break
         if len(merged.themes) >= 12:
             break
 
-    # notes
-    merged.notes = partials[0].notes if partials[0].notes else ""
+    merged.notes = (partials[0].notes or "").strip()
     return merged
+
+# ---------------------------
+# AI Rendering (KEEP THIS BLOCK)
+# ---------------------------
+import math
+
+def _crit_style(crit: str):
+    crit = (crit or "").upper().strip()
+    if crit == "CRITICAL":
+        return {"face": "#fde2e2", "edge": "#d14949"}
+    if crit == "HIGH":
+        return {"face": "#fff1d6", "edge": "#c47f00"}
+    if crit == "MEDIUM":
+        return {"face": "#e8f1ff", "edge": "#2f6fb0"}
+    return {"face": "#eef7ee", "edge": "#2f7a3d"}  # LOW
+
+
+def _wrap(s: str, width: int) -> str:
+    s = (s or "").strip()
+    return textwrap.fill(s, width=width) if s else ""
+
+
+def _add_comments_insights_cards_to_pdf(
+    pdf,                 # PdfPages
+    title: str,
+    insights: CommentsInsights,
+    themes_per_page: int = 6,
+) -> None:
+    if insights is None or not getattr(insights, "themes", None):
+        return
+
+    themes = list(insights.themes)
+    chunks = [themes[i:i + themes_per_page] for i in range(0, len(themes), themes_per_page)]
+
+    for page_i, page_themes in enumerate(chunks, start=1):
+        fig = plt.figure(figsize=(11, 8.5))
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+
+        header = title if len(chunks) == 1 else f"{title} (Page {page_i}/{len(chunks)})"
+        ax.text(0.02, 0.97, header, ha="left", va="top",
+                fontsize=16, fontweight="bold", transform=ax.transAxes)
+
+        # Top priorities (only on first page)
+        y_top = 0.92
+        if page_i == 1 and getattr(insights, "top_priorities", None):
+            ax.text(0.02, y_top, "Top priorities", ha="left", va="top",
+                    fontsize=12, fontweight="bold", transform=ax.transAxes)
+            y_top -= 0.03
+            for p in (insights.top_priorities or [])[:6]:
+                ax.text(0.03, y_top, f"- {_wrap(p, 95)}", ha="left", va="top",
+                        fontsize=10, transform=ax.transAxes)
+                y_top -= 0.03
+
+        # Cards: 2 columns
+        left_x, right_x = 0.02, 0.51
+        card_w = 0.47
+        card_h = 0.15
+        gap_y = 0.018
+
+        # Start lower if priorities printed
+        y = 0.72 if (page_i == 1 and (insights.top_priorities or [])) else 0.90
+
+        col = 0
+        base_idx = (page_i - 1) * themes_per_page
+
+        for j, t in enumerate(page_themes, start=1):
+            idx = base_idx + j
+            x = left_x if col == 0 else right_x
+
+            style = _crit_style(getattr(t, "criticality", "LOW"))
+            rect = patches.FancyBboxPatch(
+                (x, y - card_h),
+                card_w, card_h,
+                boxstyle="round,pad=0.008,rounding_size=0.01",
+                linewidth=1.2,
+                edgecolor=style["edge"],
+                facecolor=style["face"],
+                transform=ax.transAxes,
+            )
+            ax.add_patch(rect)
+
+            title_line = f"{idx}) {getattr(t, 'title', '').strip()}"
+            meta_line = f"Frequency: {getattr(t, 'frequency', '')}   |   Criticality: {getattr(t, 'criticality', '')}"
+
+            ax.text(x + 0.012, y - 0.015, _wrap(title_line, 52),
+                    ha="left", va="top", fontsize=11, fontweight="bold", transform=ax.transAxes)
+            ax.text(x + 0.012, y - 0.045, meta_line,
+                    ha="left", va="top", fontsize=9, transform=ax.transAxes)
+
+            wbs = _wrap(getattr(t, "whats_being_said", ""), 72)
+            ax.text(x + 0.012, y - 0.070, wbs,
+                    ha="left", va="top", fontsize=9, transform=ax.transAxes)
+
+            emos = getattr(t, "emotional_signals", []) or []
+            if emos:
+                emo_line = "Signals: " + ", ".join([str(e).strip() for e in emos[:6] if str(e).strip()])
+                ax.text(x + 0.012, y - 0.120, _wrap(emo_line, 72),
+                        ha="left", va="top", fontsize=8.5, transform=ax.transAxes)
+
+            # next slot
+            if col == 1:
+                y -= (card_h + gap_y)
+                col = 0
+            else:
+                col = 1
+
+        # Notes only on last page
+        if page_i == len(chunks) and getattr(insights, "notes", "").strip():
+            ax.text(0.02, 0.06, "Notes", ha="left", va="top",
+                    fontsize=11, fontweight="bold", transform=ax.transAxes)
+            ax.text(0.02, 0.035, _wrap(insights.notes, 120),
+                    ha="left", va="top", fontsize=9, transform=ax.transAxes)
+
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
 
 
 #End AI Helpers
@@ -1237,9 +1381,9 @@ def _crit_rank(c: str) -> int:
     return order.get((c or "").strip().upper(), 9)
 
 def _add_all_teams_comments_insights_page_to_pdf(
-    pdf: PdfPages,
-    profile: SurveyProfile,
-    df: pd.DataFrame,
+    pdf,                 # PdfPages
+    profile,
+    df,
     cycle_label: str,
     model: str = "gpt-5-mini",
     chunk_size: int = 60,
@@ -1256,141 +1400,22 @@ def _add_all_teams_comments_insights_page_to_pdf(
     if not comments:
         return
 
-    insights = _llm_summarize_comments_structured(client, comments, model=model, chunk_size=chunk_size)
-    if not insights or not insights.themes:
+    insights = _llm_summarize_comments_structured(
+        client,
+        comments,
+        model=model,
+        chunk_size=chunk_size,
+    )
+    if insights is None or not insights.themes:
         return
 
-    # -------------------------
-    # Page 1: Executive summary
-    # -------------------------
-    fig = plt.figure(figsize=(11, 8.5))
-    ax = fig.add_subplot(111)
-    ax.axis("off")
-
     title = f"All Teams - {cycle_label} - Comments Insights"
-    ax.text(0.5, 0.96, title, ha="center", va="top", fontsize=16, fontweight="bold", transform=ax.transAxes)
-
-    ax.text(
-        0.02, 0.90,
-        f"Source: {len(comments)} meaningful comments (deduplicated).",
-        ha="left", va="top", fontsize=10, transform=ax.transAxes
+    _add_comments_insights_cards_to_pdf(
+        pdf,
+        title=title,
+        insights=insights,
+        themes_per_page=6,
     )
-
-    # Criticality scale box
-    scale_text = (
-        "Criticality scale\n"
-        "CRITICAL: threatens to leave / not recommend / strong anger\n"
-        "HIGH: strong frustration, repeated pain point, expectation gap\n"
-        "MEDIUM: constructive suggestions, annoyance not dealbreaker\n"
-        "LOW: minor inconvenience\n"
-    )
-    box = patches.FancyBboxPatch(
-        (0.02, 0.72), 0.96, 0.15,
-        boxstyle="round,pad=0.012",
-        linewidth=1.0,
-        facecolor="#F5F5F5",
-        transform=ax.transAxes
-    )
-    ax.add_patch(box)
-    ax.text(0.04, 0.85, scale_text, ha="left", va="top", fontsize=9, transform=ax.transAxes)
-
-    # Top priorities
-    ax.text(0.02, 0.68, "Top priorities", ha="left", va="top", fontsize=13, fontweight="bold", transform=ax.transAxes)
-    y = 0.64
-    for i, p in enumerate(insights.top_priorities[:6], start=1):
-        ax.text(0.04, y, f"{i}. {_wrap(p, 105)}", ha="left", va="top", fontsize=10, transform=ax.transAxes)
-        y -= 0.05
-
-    # Themes overview table (compact)
-    overview = []
-    for t in insights.themes[:10]:
-        overview.append([t.title, t.frequency, t.criticality])
-
-    ax.text(0.02, 0.34, "Themes overview (top 10)", ha="left", va="top", fontsize=13, fontweight="bold", transform=ax.transAxes)
-    tbl_ax = fig.add_axes([0.02, 0.05, 0.96, 0.26])
-    tbl_ax.axis("off")
-    tbl = tbl_ax.table(
-        cellText=overview,
-        colLabels=["Theme", "Frequency", "Criticality"],
-        loc="upper left",
-        colWidths=[0.72, 0.14, 0.14],
-    )
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(9)
-    tbl.scale(1.0, 1.4)
-
-    pdf.savefig(fig)
-    plt.close(fig)
-
-    # -------------------------
-    # Page 2+: Theme cards
-    # -------------------------
-    themes_sorted = sorted(insights.themes, key=lambda t: (_crit_rank(t.criticality), t.title.lower()))
-
-    cards_per_page = 4
-    for page_start in range(0, len(themes_sorted), cards_per_page):
-        page = themes_sorted[page_start:page_start + cards_per_page]
-
-        fig = plt.figure(figsize=(11, 8.5))
-        ax = fig.add_subplot(111)
-        ax.axis("off")
-
-        ax.text(
-            0.5, 0.97,
-            f"Theme details ({page_start + 1}-{min(page_start + cards_per_page, len(themes_sorted))} of {len(themes_sorted)})",
-            ha="center", va="top", fontsize=14, fontweight="bold", transform=ax.transAxes
-        )
-
-        # Card geometry
-        left = 0.03
-        width = 0.94
-        top = 0.92
-        card_h = 0.205
-        gap = 0.02
-
-        for i, t in enumerate(page):
-            y_top = top - i * (card_h + gap)
-            rect = patches.FancyBboxPatch(
-                (left, y_top - card_h), width, card_h,
-                boxstyle="round,pad=0.012",
-                linewidth=1.0,
-                facecolor="#FFFFFF",
-                edgecolor="#BBBBBB",
-                transform=ax.transAxes
-            )
-            ax.add_patch(rect)
-
-            # Header line
-            ax.text(
-                left + 0.015, y_top - 0.02,
-                t.title,
-                ha="left", va="top", fontsize=12, fontweight="bold", transform=ax.transAxes
-            )
-            ax.text(
-                left + width - 0.015, y_top - 0.02,
-                f"{t.frequency} | {t.criticality}",
-                ha="right", va="top", fontsize=10, fontweight="bold", transform=ax.transAxes
-            )
-
-            # Body
-            body_y = y_top - 0.06
-            ax.text(
-                left + 0.015, body_y,
-                "Whats being said: " + _wrap(t.whats_being_said, 120),
-                ha="left", va="top", fontsize=9.5, transform=ax.transAxes
-            )
-
-            emos = ", ".join([e.strip() for e in (t.emotional_signals or []) if e.strip()][:8])
-            if emos:
-                ax.text(
-                    left + 0.015, y_top - 0.16,
-                    "Emotional signals: " + _wrap(emos, 120),
-                    ha="left", va="top", fontsize=9.5, transform=ax.transAxes
-                )
-
-        pdf.savefig(fig)
-        plt.close(fig)
-
 
 # -----------------------------
 # Main entry
