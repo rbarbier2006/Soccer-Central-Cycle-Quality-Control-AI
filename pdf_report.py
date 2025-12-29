@@ -137,6 +137,19 @@ def _normalize_group_column_inplace(df: pd.DataFrame, profile: SurveyProfile) ->
 #---------------------------
 #AI Helpers
 #--------------------------
+class Theme(BaseModel):
+    title: str = Field(..., max_length=70)
+    frequency: Literal["Very high", "High", "Medium", "Low"]
+    criticality: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    whats_being_said: str = Field(..., max_length=320)
+    emotional_signals: list[str] = Field(default_factory=list, max_length=8)
+
+class CommentsInsights(BaseModel):
+    top_priorities: list[str] = Field(default_factory=list, max_length=6)
+    themes: list[Theme] = Field(default_factory=list, max_length=12)
+    notes: str = Field(default="", max_length=280)
+
+
 def _is_meaningful_comment(s: str) -> bool:
     if s is None:
         return False
