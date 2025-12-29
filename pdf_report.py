@@ -455,8 +455,15 @@ def _add_comments_insights_cards_to_pdf(
     # Layout strategy
     # - If verbose: fewer cards per page (taller boxes)
     # - First page with priorities gets even fewer cards
-    per_page_other = 4 if verbose_mode else max(4, int(themes_per_page))
-    per_page_first = 2 if (verbose_mode and has_priorities) else min(per_page_other, 4)
+    #per_page_other = 4 if verbose_mode else max(4, int(themes_per_page))
+    #per_page_first = 2 if (verbose_mode and has_priorities) else min(per_page_other, 4)
+    # Layout strategy
+    # Keep the first page smaller because Top priorities takes space.
+    per_page_first = 2 if (verbose_mode and has_priorities) else 4
+    
+    # Every other page: 6 cards (3 rows x 2 cols)
+    per_page_other = 6
+
 
     # Split themes into pages
     pages: List[List[Theme]] = []
@@ -537,7 +544,10 @@ def _add_comments_insights_cards_to_pdf(
         #------
         available_h = max(0.10, y - bottom_margin)
         card_h = (available_h - (rows - 1) * gap_y) / rows
-        card_h = max(card_h, 0.22 if verbose_mode else 0.18)
+        #card_h = max(card_h, 0.22 if verbose_mode else 0.18)
+        # Allow smaller cards so 3 rows can fit (6 per page)
+        card_h = max(card_h, 0.16 if verbose_mode else 0.15)
+
         #-
         #available_h = max(0.10, y - bottom_margin)
         #card_h = (available_h - (rows - 1) * gap_y) / rows
