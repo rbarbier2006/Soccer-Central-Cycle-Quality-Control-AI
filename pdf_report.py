@@ -23,6 +23,9 @@ from collections import defaultdict
 import os
 import streamlit as st
 
+from typing import Literal
+from pydantic import BaseModel, Field
+
 # Load key from Streamlit secrets into env var so the OpenAI SDK can find it
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
