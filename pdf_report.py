@@ -14,7 +14,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from profiles import SurveyProfile, PROFILES
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import matplotlib.patches as patches
 
 from openai import OpenAI
@@ -61,8 +61,9 @@ def _get_unique_respondent_count(df_group: pd.DataFrame, name_idx: int) -> int:
 def _compose_group_title(profile: SurveyProfile, title_label: str, cycle_label: str) -> str:
     base = str(title_label).strip()
 
-    if base == "All Teams":
-        return f"All Teams - {cycle_label}"
+    # Any label like "All Teams", "All Coaches", etc.
+    if base.lower().startswith("all "):
+        return f"{base} - {cycle_label}"
 
     if " - " in base:
         return f"{base} - {cycle_label}"
@@ -1552,6 +1553,7 @@ def _add_all_teams_comments_insights_page_to_pdf(
     cycle_label: str,
     model: str = "gpt-5-mini",
     chunk_size: int = 60,
+    title_label: str = "All Teams",
 ) -> None:
     client = _try_get_openai_client()
     if client is None:
@@ -1574,7 +1576,7 @@ def _add_all_teams_comments_insights_page_to_pdf(
     if insights is None or not insights.themes:
         return
 
-    title = f"All Teams - {cycle_label} - Comments Insights (CARDS_V1)"
+    title = f"{title_label} - {cycle_label} - Comments Insights (CARDS_V1)"
     _add_comments_insights_cards_to_pdf(
         pdf,
         title=title,
@@ -1600,6 +1602,13 @@ def create_pdf_report(
         output_path = base + f"_{profile.key}_report.pdf"
 
     df = pd.read_excel(input_path, sheet_name=0)
+
+    # Coaches survey: force a single "team" so we reuse the same pipeline.
+    # This is intentionally deterministic (no fuzzy matching, no AI matching).
+    if profile.key.lower() == "coaches":
+        df = df.copy()
+        df["_GROUP_"] = "All Coaches"
+        profile = replace(profile, group_col_index=len(df.columns) - 1)
 
     _assert_profile_and_df_make_sense(profile, df)
     group_col_name = _normalize_group_column_inplace(df, profile)
@@ -1656,6 +1665,24 @@ def create_pdf_report(
     }
 
     with PdfPages(output_path) as pdf:
+        # Coaches report: one global overview only.
+        if profile.key.lower() == "coaches":
+            all_label = "All Coaches"
+            all_meta = _build_plot_metadata(profile, df)
+            _add_group_charts_page_to_pdf(pdf, profile, df, all_label, cycle_label, all_meta)
+            # Use team-mode so the page includes the list of coaches who completed.
+            _add_group_tables_page_to_pdf(pdf, profile, df, all_label, cycle_label, all_meta, is_all_teams=False)
+            _add_all_teams_comments_insights_page_to_pdf(
+                pdf,
+                profile,
+                df,
+                cycle_label=cycle_label,
+                model="gpt-5-mini",
+                chunk_size=60,
+                title_label=all_label,
+            )
+            return output_path
+
         _add_cycle_summary_page(pdf, profile, df, cycle_label)
 
         all_meta = _build_plot_metadata(profile, df)
@@ -1700,4 +1727,5 @@ def create_pdf_from_original(
         survey_type="players",
         output_path=output_path,
     )
+
 
