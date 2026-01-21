@@ -13,7 +13,7 @@ st.set_page_config(page_title="Soccer Central AI Quality Control", layout="cente
 st.title("Soccer Central AI Quality Control")
 st.caption("Upload a survey export (.xlsx) and generate the PDF report.")
 
-survey_type = st.selectbox("Survey type", ["players", "families", "coaches"], index=0)
+survey_type = st.selectbox("Survey type", ["players", "families", "staff"], index=0)
 
 cycle_label = st.text_input("Cycle label (shown in PDF title)", value="Cycle 3")
 
