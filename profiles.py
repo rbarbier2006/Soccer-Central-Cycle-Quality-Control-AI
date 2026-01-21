@@ -215,8 +215,51 @@ FAMILIES_PROFILE = SurveyProfile(
 )
 
 
-# Registry used by pdf_report.py
+# -----------------------------
+# Coaches profile (NEW)
+# -----------------------------
+
+COACHES_RATING_COLS = tuple([
+    col("G"), col("H"), col("I"),   # first set of 1–5 rating questions
+    col("K"), col("L"), col("M"), col("N"), col("O"), col("P"), col("Q"), col("R")  # second set
+])
+
+COACHES_YESNO_COLS = tuple([col("J")])
+
+COACHES_CHART_LABELS: Dict[int, str] = {
+    1: "(1) Q1",
+    2: "(2) Q2",
+    3: "(3) Q3",
+    4: "(4) Q4",
+    5: "(5) Q5",
+    6: "(6) Q6",
+    7: "(7) Q7",
+    8: "(8) Q8",
+    9: "(9) Q9",
+    10: "(10) Q10",
+    11: "(11) Q11",
+    12: "(12) Q12",
+}
+
+COACHES_PROFILE = SurveyProfile(
+    key="coaches",
+    title="Coaches Survey",
+    respondent_singular="coach",
+    respondent_plural="coaches",
+    respondent_name_index=col("F"),     # Coach name column
+    group_col_index=col("F"),           # Placeholder; overridden in pdf_report.py
+    rating_col_indices=COACHES_RATING_COLS,
+    yesno_col_indices=COACHES_YESNO_COLS,
+    choice_col_index=None,
+    qq_rating_col_index=col("R"),       # last rating = overall satisfaction (example)
+    team_coach_map=None,
+    denominator_map=None,
+    chart_labels=COACHES_CHART_LABELS,
+)
+
+
 PROFILES: Dict[str, SurveyProfile] = {
     "players": PLAYERS_PROFILE,
     "families": FAMILIES_PROFILE,
+    "coaches": COACHES_PROFILE,  # NEW
 }
