@@ -227,18 +227,18 @@ COACHES_RATING_COLS = tuple([
 COACHES_YESNO_COLS = tuple([col("J")])
 
 COACHES_CHART_LABELS: Dict[int, str] = {
-    1: "(1) Q1",
-    2: "(2) Q2",
-    3: "(3) Q3",
-    4: "(4) Q4",
-    5: "(5) Q5",
-    6: "(6) Q6",
-    7: "(7) Q7",
-    8: "(8) Q8",
-    9: "(9) Q9",
-    10: "(10) Q10",
-    11: "(11) Q11",
-    12: "(12) Q12",
+    1: "(1) Support",
+    2: "(2) Communication",
+    3: "(3) Collaboration",
+    4: "(4) Facility Condition",
+    5: "(5) Scheduling",
+    6: "(6) Applying Values",
+    7: "(7) Seeing Values",
+    8: "(8) Growth",
+    9: "(9) Wellbeing",
+    10: "(10) Overall Values",
+    11: "(11) Overall Experience",
+    12: "(12) On-time Payroll",
 }
 
 COACHES_PROFILE = SurveyProfile(
