@@ -242,8 +242,8 @@ COACHES_CHART_LABELS: Dict[int, str] = {
 }
 
 COACHES_PROFILE = SurveyProfile(
-    key="staff",
-    title="Staff Survey",
+    key="coaches",
+    title="Coaches Survey",
     respondent_singular="coach",
     respondent_plural="coaches",
     respondent_name_index=col("F"),     # Coach name column
@@ -261,5 +261,5 @@ COACHES_PROFILE = SurveyProfile(
 PROFILES: Dict[str, SurveyProfile] = {
     "players": PLAYERS_PROFILE,
     "families": FAMILIES_PROFILE,
-    "staff": COACHES_PROFILE,  # NEW
+    "coaches": COACHES_PROFILE,  # NEW
 }
