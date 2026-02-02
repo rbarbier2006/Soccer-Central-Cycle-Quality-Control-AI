@@ -261,5 +261,5 @@ COACHES_PROFILE = SurveyProfile(
 PROFILES: Dict[str, SurveyProfile] = {
     "players": PLAYERS_PROFILE,
     "families": FAMILIES_PROFILE,
-    "coaches": COACHES_PROFILE,  # NEW
+    "staff": COACHES_PROFILE,  # NEW
 }
