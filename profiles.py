@@ -52,14 +52,14 @@ class SurveyProfile:
 # -----------------------------
 
 TEAM_COACH_MAP: Dict[str, str] = {
-    "MLS HG U19": "Jorge",
+    "MLS HG U19": "Michael", #previous Jorge
     "MLS HG U17": "Chris",
     "MLS HG U16": "David K",
-    "MLS HG U15": "Jorge",
+    "MLS HG U15": "Michael A", #previous Jorge
     "MLS HG U14": "David K",
     "MLS HG U13": "Chris M",
-    "MLS AD U19": "Michael",
-    "MLS AD U17": "Michael",
+    "MLS AD U19": "TBD", #previous Michael
+    "MLS AD U17": "TBD", #previous Michael
     "MLS AD U16": "Miguel",
     "MLS AD U15": "Miguel",
     "MLS AD U14": "Junro",
@@ -76,8 +76,8 @@ TEAM_COACH_MAP: Dict[str, str] = {
     "Athenians U13": "Keeley",
     "Athenians WDDOA U12": "Keeley",
     "Athenians WDDOA U11": "Robert",
-    "Athenians PDF U10": "Robert",
-    "Athenians PDF U9": "Robert",
+    "Athenians PDF U10": "TBD", #previous Robert
+    "Athenians PDF U9": "TBD", #previous Robert
     "WDDOA U12": "Adam",
     "WDDOA U11": "Adam",
     "PDF U10 White": "Steven",
