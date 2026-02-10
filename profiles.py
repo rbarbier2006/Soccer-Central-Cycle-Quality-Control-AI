@@ -75,7 +75,7 @@ TEAM_COACH_MAP: Dict[str, str] = {
     "Athenians U16": "Rumen",
     "Athenians U13": "Keeley",
     "Athenians WDDOA U12": "Keeley",
-    "Athenians WDDOA U11": "Robert",
+    "Athenians WDDOA U11": "TBD", #previous Robert
     "Athenians PDF U10": "TBD", #previous Robert
     "Athenians PDF U9": "TBD", #previous Robert
     "WDDOA U12": "Adam",
